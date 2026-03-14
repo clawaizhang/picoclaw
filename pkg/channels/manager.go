@@ -307,6 +307,11 @@ func (m *Manager) initChannels() error {
 		m.initChannel("irc", "IRC")
 	}
 
+	// 初始化第三方嵌入通道
+	if m.config.Channels.Ext.Enabled && m.config.Channels.Ext.Command != "" {
+		m.initChannel("ext", "Ext")
+	}
+
 	logger.InfoCF("channels", "Channel initialization completed", map[string]any{
 		"enabled_channels": len(m.channels),
 	})

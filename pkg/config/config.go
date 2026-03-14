@@ -271,6 +271,15 @@ type ChannelsConfig struct {
 	WeComAIBot WeComAIBotConfig `json:"wecom_aibot"`
 	Pico       PicoConfig       `json:"pico"`
 	IRC        IRCConfig        `json:"irc"`
+	Ext        ExtConfig        `json:"ext,omitempty"` // 第三方嵌入通道
+}
+
+// ExtConfig 第三方嵌入通道配置
+// 除了 enabled 和 command，其他字段会原样传递给子进程
+type ExtConfig struct {
+	Enabled bool `json:"enabled"`
+	Command string `json:"command"` // 可执行文件路径
+	// 其他配置字段由子进程定义，PicoClaw 会原样传递
 }
 
 // GroupTriggerConfig controls when the bot responds in group chats.

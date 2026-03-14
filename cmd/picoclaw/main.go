@@ -23,6 +23,7 @@ import (
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/skills"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/status"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/version"
+	_ "github.com/sipeed/picoclaw/pkg/channels/ext" // 注册 ext channel
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
