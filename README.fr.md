@@ -214,6 +214,7 @@ Connectez PicoClaw au Réseau Social d'Agents simplement en envoyant un seul mes
 
 **Lisez `https://clawdchat.ai/skill.md` et suivez les instructions pour rejoindre [ClawdChat.ai](https://clawdchat.ai)**
 
+<<<<<<< HEAD
 ## 🖥️ Référence CLI
 
 | Commande                  | Description                        |
@@ -233,6 +234,548 @@ Connectez PicoClaw au Réseau Social d'Agents simplement en envoyant un seul mes
 | `picoclaw migrate`        | Migrer les données des anciennes versions |
 | `picoclaw auth login`     | S'authentifier auprès des fournisseurs |
 | `picoclaw model`          | Voir ou changer le modèle par défaut |
+=======
+## ⚙️ Configuration
+
+Fichier de configuration : `~/.picoclaw/config.json`
+
+### Variables d'Environnement
+
+Vous pouvez remplacer les chemins par défaut à l'aide de variables d'environnement. Ceci est utile pour les installations portables, les déploiements conteneurisés ou l'exécution de picoclaw en tant que service système. Ces variables sont indépendantes et contrôlent différents chemins.
+
+| Variable          | Description                                                                                                                             | Chemin par Défaut         |
+|-------------------|-----------------------------------------------------------------------------------------------------------------------------------------|---------------------------|
+| `PICOCLAW_CONFIG` | Remplace le chemin du fichier de configuration. Cela indique directement à picoclaw quel `config.json` charger, en ignorant tous les autres emplacements. | `~/.picoclaw/config.json` |
+| `PICOCLAW_HOME`   | Remplace le répertoire racine des données picoclaw. Cela modifie l'emplacement par défaut du `workspace` et des autres répertoires de données.          | `~/.picoclaw`             |
+
+**Exemples :**
+
+```bash
+# Exécuter picoclaw en utilisant un fichier de configuration spécifique
+# Le chemin du workspace sera lu à partir de ce fichier de configuration
+PICOCLAW_CONFIG=/etc/picoclaw/production.json picoclaw gateway
+
+# Exécuter picoclaw avec toutes ses données stockées dans /opt/picoclaw
+# La configuration sera chargée à partir du fichier par défaut ~/.picoclaw/config.json
+# Le workspace sera créé dans /opt/picoclaw/workspace
+PICOCLAW_HOME=/opt/picoclaw picoclaw agent
+
+# Utiliser les deux pour une configuration entièrement personnalisée
+PICOCLAW_HOME=/srv/picoclaw PICOCLAW_CONFIG=/srv/picoclaw/main.json picoclaw gateway
+```
+
+### Structure du Workspace
+
+PicoClaw stocke les données dans votre workspace configuré (par défaut : `~/.picoclaw/workspace`) :
+
+```
+~/.picoclaw/workspace/
+├── sessions/          # Sessions de conversation et historique
+├── memory/           # Mémoire à long terme (MEMORY.md)
+├── state/            # État persistant (dernier canal, etc.)
+├── cron/             # Base de données des tâches planifiées
+├── skills/           # Compétences personnalisées
+├── AGENT.md          # Définition structurée de l'agent et prompt système
+├── HEARTBEAT.md      # Invites de tâches périodiques (vérifiées toutes les 30 min)
+├── SOUL.md           # Âme de l'Agent
+└── ...
+```
+
+### 🔒 Bac à Sable de Sécurité
+
+PicoClaw s'exécute dans un environnement sandboxé par défaut. L'agent ne peut accéder aux fichiers et exécuter des commandes qu'au sein du workspace configuré.
+
+#### Configuration par Défaut
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.picoclaw/workspace",
+      "restrict_to_workspace": true
+    }
+  }
+}
+```
+
+| Option | Par défaut | Description |
+|--------|------------|-------------|
+| `workspace` | `~/.picoclaw/workspace` | Répertoire de travail de l'agent |
+| `restrict_to_workspace` | `true` | Restreindre l'accès fichiers/commandes au workspace |
+
+#### Outils Protégés
+
+Lorsque `restrict_to_workspace: true`, les outils suivants sont restreints au bac à sable :
+
+| Outil | Fonction | Restriction |
+|-------|----------|-------------|
+| `read_file` | Lire des fichiers | Uniquement les fichiers dans le workspace |
+| `write_file` | Écrire des fichiers | Uniquement les fichiers dans le workspace |
+| `list_dir` | Lister des répertoires | Uniquement les répertoires dans le workspace |
+| `edit_file` | Éditer des fichiers | Uniquement les fichiers dans le workspace |
+| `append_file` | Ajouter à des fichiers | Uniquement les fichiers dans le workspace |
+| `exec` | Exécuter des commandes | Les chemins doivent être dans le workspace |
+
+#### Protection Supplémentaire d'Exec
+
+Même avec `restrict_to_workspace: false`, l'outil `exec` bloque ces commandes dangereuses :
+
+* `rm -rf`, `del /f`, `rmdir /s` — Suppression en masse
+* `format`, `mkfs`, `diskpart` — Formatage de disque
+* `dd if=` — Écriture d'image disque
+* Écriture vers `/dev/sd[a-z]` — Écriture directe sur le disque
+* `shutdown`, `reboot`, `poweroff` — Arrêt du système
+* Fork bomb `:(){ :|:& };:`
+
+#### Exemples d'Erreurs
+
+```
+[ERROR] tool: Tool execution failed
+{tool=exec, error=Command blocked by safety guard (path outside working dir)}
+```
+
+```
+[ERROR] tool: Tool execution failed
+{tool=exec, error=Command blocked by safety guard (dangerous pattern detected)}
+```
+
+#### Désactiver les Restrictions (Risque de Sécurité)
+
+Si vous avez besoin que l'agent accède à des chemins en dehors du workspace :
+
+**Méthode 1 : Fichier de configuration**
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "restrict_to_workspace": false
+    }
+  }
+}
+```
+
+**Méthode 2 : Variable d'environnement**
+
+```bash
+export PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE=false
+```
+
+> ⚠️ **Attention** : Désactiver cette restriction permet à l'agent d'accéder à n'importe quel chemin sur votre système. À utiliser avec précaution uniquement dans des environnements contrôlés.
+
+#### Cohérence du Périmètre de Sécurité
+
+Le paramètre `restrict_to_workspace` s'applique de manière cohérente sur tous les chemins d'exécution :
+
+| Chemin d'Exécution | Périmètre de Sécurité |
+|--------------------|----------------------|
+| Agent Principal | `restrict_to_workspace` ✅ |
+| Sous-agent / Spawn | Hérite de la même restriction ✅ |
+| Tâches Heartbeat | Hérite de la même restriction ✅ |
+
+Tous les chemins partagent la même restriction de workspace — il est impossible de contourner le périmètre de sécurité via des sous-agents ou des tâches planifiées.
+
+### Heartbeat (Tâches Périodiques)
+
+PicoClaw peut exécuter des tâches périodiques automatiquement. Créez un fichier `HEARTBEAT.md` dans votre workspace :
+
+```markdown
+# Tâches Périodiques
+
+- Vérifier mes e-mails pour les messages importants
+- Consulter mon agenda pour les événements à venir
+- Vérifier les prévisions météo
+```
+
+L'agent lira ce fichier toutes les 30 minutes (configurable) et exécutera les tâches à l'aide des outils disponibles.
+
+#### Tâches Asynchrones avec Spawn
+
+Pour les tâches de longue durée (recherche web, appels API), utilisez l'outil `spawn` pour créer un **sous-agent** :
+
+```markdown
+# Tâches Périodiques
+
+## Tâches Rapides (réponse directe)
+- Indiquer l'heure actuelle
+
+## Tâches Longues (utiliser spawn pour l'asynchrone)
+- Rechercher les actualités IA sur le web et les résumer
+- Vérifier les e-mails et signaler les messages importants
+```
+
+**Comportements clés :**
+
+| Fonctionnalité | Description |
+|----------------|-------------|
+| **spawn** | Crée un sous-agent asynchrone, ne bloque pas le heartbeat |
+| **Contexte indépendant** | Le sous-agent a son propre contexte, sans historique de session |
+| **Outil message** | Le sous-agent communique directement avec l'utilisateur via l'outil message |
+| **Non-bloquant** | Après le spawn, le heartbeat continue vers la tâche suivante |
+
+#### Fonctionnement de la Communication du Sous-agent
+
+```
+Le Heartbeat se déclenche
+    ↓
+L'Agent lit HEARTBEAT.md
+    ↓
+Pour une tâche longue : spawn d'un sous-agent
+    ↓                           ↓
+Continue la tâche suivante   Le sous-agent travaille indépendamment
+    ↓                           ↓
+Toutes les tâches terminées  Le sous-agent utilise l'outil "message"
+    ↓                           ↓
+Répond HEARTBEAT_OK          L'utilisateur reçoit le résultat directement
+```
+
+Le sous-agent a accès aux outils (message, web_search, etc.) et peut communiquer avec l'utilisateur indépendamment sans passer par l'agent principal.
+
+**Configuration :**
+
+```json
+{
+  "heartbeat": {
+    "enabled": true,
+    "interval": 30
+  }
+}
+```
+
+| Option | Par défaut | Description |
+|--------|------------|-------------|
+| `enabled` | `true` | Activer/désactiver le heartbeat |
+| `interval` | `30` | Intervalle de vérification en minutes (min : 5) |
+
+**Variables d'environnement :**
+
+* `PICOCLAW_HEARTBEAT_ENABLED=false` pour désactiver
+* `PICOCLAW_HEARTBEAT_INTERVAL=60` pour modifier l'intervalle
+
+### Fournisseurs
+
+> [!NOTE]
+> Groq fournit la transcription vocale gratuite via Whisper. Si configuré, les messages audio de n'importe quel canal seront automatiquement transcrits au niveau de l'agent.
+
+| Fournisseur              | Utilisation                              | Obtenir une Clé API                                    |
+| ------------------------ | ---------------------------------------- | ------------------------------------------------------ |
+| `gemini`                 | LLM (Gemini direct)                      | [aistudio.google.com](https://aistudio.google.com)     |
+| `zhipu`                  | LLM (Zhipu direct)                       | [bigmodel.cn](bigmodel.cn)                             |
+| `volcengine`             | LLM(Volcengine direct)                   | [volcengine.com](https://www.volcengine.com/activity/codingplan?utm_campaign=PicoClaw&utm_content=PicoClaw&utm_medium=devrel&utm_source=OWO&utm_term=PicoClaw)           |
+| `openrouter` (À tester)  | LLM (recommandé, accès à tous les modèles) | [openrouter.ai](https://openrouter.ai)               |
+| `anthropic` (À tester)   | LLM (Claude direct)                      | [console.anthropic.com](https://console.anthropic.com) |
+| `openai` (À tester)      | LLM (GPT direct)                         | [platform.openai.com](https://platform.openai.com)     |
+| `deepseek` (À tester)    | LLM (DeepSeek direct)                    | [platform.deepseek.com](https://platform.deepseek.com) |
+| `qwen`                   | LLM (Alibaba Qwen)                      | [dashscope.aliyuncs.com](https://dashscope.aliyuncs.com/compatible-mode/v1) |
+| `cerebras`               | LLM (Cerebras)                           | [cerebras.ai](https://api.cerebras.ai/v1)              |
+| `groq`                   | LLM + **Transcription vocale** (Whisper) | [console.groq.com](https://console.groq.com)           |
+
+<details>
+<summary><b>Configuration Zhipu</b></summary>
+
+**1. Obtenir la clé API**
+
+* Obtenez la [clé API](https://bigmodel.cn/usercenter/proj-mgmt/apikeys)
+
+**2. Configurer**
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.picoclaw/workspace",
+      "model": "glm-4.7",
+      "max_tokens": 8192,
+      "temperature": 0.7,
+      "max_tool_iterations": 20
+    }
+  },
+  "providers": {
+    "zhipu": {
+      "api_key": "Votre Clé API",
+      "api_base": "https://open.bigmodel.cn/api/paas/v4"
+    }
+  }
+}
+```
+
+**3. Lancer**
+
+```bash
+picoclaw agent -m "Bonjour, comment ça va ?"
+```
+
+</details>
+
+<details>
+<summary><b>Exemple de configuration complète</b></summary>
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "anthropic/claude-opus-4-5"
+    }
+  },
+  "providers": {
+    "openrouter": {
+      "api_key": "sk-or-v1-xxx"
+    },
+    "groq": {
+      "api_key": "gsk_xxx"
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "123456:ABC...",
+      "allow_from": ["123456789"]
+    },
+    "discord": {
+      "enabled": true,
+      "token": "",
+      "allow_from": [""]
+    },
+    "whatsapp": {
+      "enabled": false
+    },
+    "feishu": {
+      "enabled": false,
+      "app_id": "cli_xxx",
+      "app_secret": "xxx",
+      "encrypt_key": "",
+      "verification_token": "",
+      "allow_from": []
+    },
+    "qq": {
+      "enabled": false,
+      "app_id": "",
+      "app_secret": "",
+      "allow_from": []
+    }
+  },
+  "tools": {
+    "web": {
+      "brave": {
+        "enabled": false,
+        "api_key": "BSA...",
+        "max_results": 5
+      },
+      "duckduckgo": {
+        "enabled": true,
+        "max_results": 5
+      }
+    },
+    "cron": {
+      "exec_timeout_minutes": 5
+    }
+  },
+  "heartbeat": {
+    "enabled": true,
+    "interval": 30
+  }
+}
+```
+
+</details>
+
+### Configuration de Modèle (model_list)
+
+> **Nouveau !** PicoClaw utilise désormais une approche de configuration **centrée sur le modèle**. Spécifiez simplement le format `fournisseur/modèle` (par exemple, `zhipu/glm-4.7`) pour ajouter de nouveaux fournisseurs—**aucune modification de code requise !**
+
+Cette conception permet également le **support multi-agent** avec une sélection flexible de fournisseurs :
+
+- **Différents agents, différents fournisseurs** : Chaque agent peut utiliser son propre fournisseur LLM
+- **Modèles de secours (Fallbacks)** : Configurez des modèles primaires et de secours pour la résilience
+- **Équilibrage de charge** : Répartissez les requêtes sur plusieurs points de terminaison
+- **Configuration centralisée** : Gérez tous les fournisseurs en un seul endroit
+
+#### 📋 Tous les Fournisseurs Supportés
+
+| Fournisseur | Préfixe `model` | API Base par Défaut | Protocole | Clé API |
+|-------------|-----------------|---------------------|----------|---------|
+| **OpenAI** | `openai/` | `https://api.openai.com/v1` | OpenAI | [Obtenir Clé](https://platform.openai.com) |
+| **Anthropic** | `anthropic/` | `https://api.anthropic.com/v1` | Anthropic | [Obtenir Clé](https://console.anthropic.com) |
+| **Zhipu AI (GLM)** | `zhipu/` | `https://open.bigmodel.cn/api/paas/v4` | OpenAI | [Obtenir Clé](https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys) |
+| **DeepSeek** | `deepseek/` | `https://api.deepseek.com/v1` | OpenAI | [Obtenir Clé](https://platform.deepseek.com) |
+| **Google Gemini** | `gemini/` | `https://generativelanguage.googleapis.com/v1beta` | OpenAI | [Obtenir Clé](https://aistudio.google.com/api-keys) |
+| **Groq** | `groq/` | `https://api.groq.com/openai/v1` | OpenAI | [Obtenir Clé](https://console.groq.com) |
+| **Moonshot** | `moonshot/` | `https://api.moonshot.cn/v1` | OpenAI | [Obtenir Clé](https://platform.moonshot.cn) |
+| **Qwen (Alibaba)** | `qwen/` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI | [Obtenir Clé](https://dashscope.console.aliyun.com) |
+| **NVIDIA** | `nvidia/` | `https://integrate.api.nvidia.com/v1` | OpenAI | [Obtenir Clé](https://build.nvidia.com) |
+| **Ollama** | `ollama/` | `http://localhost:11434/v1` | OpenAI | Local (pas de clé nécessaire) |
+| **OpenRouter** | `openrouter/` | `https://openrouter.ai/api/v1` | OpenAI | [Obtenir Clé](https://openrouter.ai/keys) |
+| **VLLM** | `vllm/` | `http://localhost:8000/v1` | OpenAI | Local |
+| **Cerebras** | `cerebras/` | `https://api.cerebras.ai/v1` | OpenAI | [Obtenir Clé](https://cerebras.ai) |
+| **VolcEngine (Doubao)** | `volcengine/` | `https://ark.cn-beijing.volces.com/api/v3` | OpenAI | [Obtenir Clé](https://www.volcengine.com/activity/codingplan?utm_campaign=PicoClaw&utm_content=PicoClaw&utm_medium=devrel&utm_source=OWO&utm_term=PicoClaw) |
+| **ShengsuanYun** | `shengsuanyun/` | `https://router.shengsuanyun.com/api/v1` | OpenAI | - |
+| **BytePlus**        | `byteplus/`       | `https://ark.ap-southeast.bytepluses.com/api/v3`    | OpenAI    | [Obtenir Clé](https://www.byteplus.com/)                    |
+| **LongCat**         | `longcat/`        | `https://api.longcat.chat/openai`                   | OpenAI    | [Obtenir une clé](https://longcat.chat/platform)                 |
+| **ModelScope (魔搭)**| `modelscope/`    | `https://api-inference.modelscope.cn/v1`            | OpenAI    | [Obtenir un Token](https://modelscope.cn/my/tokens)              |
+| **Antigravity** | `antigravity/` | Google Cloud | Custom | OAuth uniquement |
+| **GitHub Copilot** | `github-copilot/` | `localhost:4321` | gRPC | - |
+
+#### Configuration de Base
+
+```json
+{
+  "model_list": [
+    {
+      "model_name": "ark-code-latest",
+      "model": "volcengine/ark-code-latest",
+      "api_key": "sk-your-api-key"
+    },
+    {
+      "model_name": "gpt-5.4",
+      "model": "openai/gpt-5.4",
+      "api_key": "sk-your-openai-key"
+    },
+    {
+      "model_name": "claude-sonnet-4.6",
+      "model": "anthropic/claude-sonnet-4.6",
+      "api_key": "sk-ant-your-key"
+    },
+    {
+      "model_name": "glm-4.7",
+      "model": "zhipu/glm-4.7",
+      "api_key": "your-zhipu-key"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "model": "gpt-5.4"
+    }
+  }
+}
+```
+
+#### Exemples par Fournisseur
+
+**OpenAI**
+```json
+{
+  "model_name": "gpt-5.4",
+  "model": "openai/gpt-5.4",
+  "api_key": "sk-..."
+}
+```
+
+**VolcEngine (Doubao)**
+```json
+{
+  "model_name": "ark-code-latest",
+  "model": "volcengine/ark-code-latest",
+  "api_key": "sk-..."
+}
+```
+
+**Zhipu AI (GLM)**
+```json
+{
+  "model_name": "glm-4.7",
+  "model": "zhipu/glm-4.7",
+  "api_key": "your-key"
+}
+```
+
+**Anthropic (avec OAuth)**
+```json
+{
+  "model_name": "claude-sonnet-4.6",
+  "model": "anthropic/claude-sonnet-4.6",
+  "auth_method": "oauth"
+}
+```
+> Exécutez `picoclaw auth login --provider anthropic` pour configurer les identifiants OAuth.
+
+**Proxy/API personnalisée**
+```json
+{
+  "model_name": "my-custom-model",
+  "model": "openai/custom-model",
+  "api_base": "https://my-proxy.com/v1",
+  "api_key": "sk-...",
+  "request_timeout": 300
+}
+```
+
+#### Équilibrage de Charge
+
+Configurez plusieurs points de terminaison pour le même nom de modèle—PicoClaw utilisera automatiquement le round-robin entre eux :
+
+```json
+{
+  "model_list": [
+    {
+      "model_name": "gpt-5.4",
+      "model": "openai/gpt-5.4",
+      "api_base": "https://api1.example.com/v1",
+      "api_key": "sk-key1"
+    },
+    {
+      "model_name": "gpt-5.4",
+      "model": "openai/gpt-5.4",
+      "api_base": "https://api2.example.com/v1",
+      "api_key": "sk-key2"
+    }
+  ]
+}
+```
+
+#### Migration depuis l'Ancienne Configuration `providers`
+
+L'ancienne configuration `providers` est **dépréciée** mais toujours supportée pour la rétrocompatibilité.
+
+**Ancienne Configuration (dépréciée) :**
+```json
+{
+  "providers": {
+    "zhipu": {
+      "api_key": "your-key",
+      "api_base": "https://open.bigmodel.cn/api/paas/v4"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "provider": "zhipu",
+      "model": "glm-4.7"
+    }
+  }
+}
+```
+
+**Nouvelle Configuration (recommandée) :**
+```json
+{
+  "model_list": [
+    {
+      "model_name": "glm-4.7",
+      "model": "zhipu/glm-4.7",
+      "api_key": "your-key"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "model": "glm-4.7"
+    }
+  }
+}
+```
+
+Pour le guide de migration détaillé, voir [docs/migration/model-list-migration.md](docs/migration/model-list-migration.md).
+
+## Référence CLI
+
+| Commande                  | Description                           |
+| ------------------------- | ------------------------------------- |
+| `picoclaw onboard`        | Initialiser la configuration & le workspace |
+| `picoclaw agent -m "..."` | Discuter avec l'agent                 |
+| `picoclaw agent`          | Mode de discussion interactif         |
+| `picoclaw gateway`        | Démarrer la passerelle                |
+| `picoclaw status`         | Afficher le statut                    |
+| `picoclaw cron list`      | Lister toutes les tâches planifiées   |
+| `picoclaw cron add ...`   | Ajouter une tâche planifiée           |
+>>>>>>> refactor/agent
 
 ### Tâches Planifiées / Rappels
 

@@ -25,7 +25,8 @@ When spawning a SubTurn, you must provide a `SubTurnConfig`:
 | :--- | :--- | :--- |
 | `Model` | `string` | The LLM model to use for the sub-turn (e.g., `gpt-4o-mini`). **Required.** |
 | `Tools` | `[]tools.Tool` | Tools granted to the sub-turn. If empty, it inherits the parent's tools. |
-| `SystemPrompt` | `string` | The system instruction for the sub-task. |
+| `SystemPrompt` | `string` | The task description for the sub-turn. Sent as the first user message to the LLM (not as a system prompt override). |
+| `ActualSystemPrompt` | `string` | Optional explicit system prompt to replace the agent's default. Leave empty to inherit the parent agent's system prompt. |
 | `MaxTokens` | `int` | Maximum tokens for the generated response. |
 | `Async` | `bool` | Controls the result delivery mode (Synchronous vs. Asynchronous). |
 | `Critical` | `bool` | If `true`, the sub-turn continues running even if the parent finishes gracefully. |
@@ -134,14 +135,12 @@ All active root turns are registered in `AgentLoop.activeTurnStates` (`sync.Map`
 
 SubTurns emit specific events to the PicoClaw `EventBus` for observability and debugging:
 
-| Event | When Emitted | Payload |
+| Event Kind | When Emitted | Payload |
 |:------|:-------------|:--------|
-| `SubTurnSpawnEvent` | Sub-turn successfully initialized | `ParentID`, `ChildID`, `Config` |
-| `SubTurnEndEvent` | Sub-turn finishes (success or error) | `ChildID`, `Result`, `Err` |
-| `SubTurnResultDeliveredEvent` | Async result successfully delivered to parent | `ParentID`, `ChildID`, `Result` |
-| `SubTurnOrphanResultEvent` | Result cannot be delivered (parent finished or channel full) | `ParentID`, `ChildID`, `Result` |
-
-> **⚠️ POC Note:** The current `EventBus` implementation is `MockEventBus`, a placeholder that only prints events to stdout via `fmt.Printf`. It is not a production-grade event system. Do not rely on it for programmatic event consumption; a real EventBus integration is planned.
+| `subturn_spawn` | Sub-turn successfully initialized | `SubTurnSpawnPayload{AgentID, Label, ParentTurnID}` |
+| `subturn_end` | Sub-turn finishes (success or error) | `SubTurnEndPayload{AgentID, Status}` |
+| `subturn_result_delivered` | Async result successfully delivered to parent | `SubTurnResultDeliveredPayload{TargetChannel, TargetChatID, ContentLen}` |
+| `subturn_orphan` | Result cannot be delivered (parent finished or channel full) | `SubTurnOrphanPayload{ParentTurnID, ChildTurnID, Reason}` |
 
 ## API Reference
 
@@ -200,8 +199,8 @@ SubTurn relies on context values for proper operation:
 
 ```go
 // Before calling tools that may spawn SubTurns
-ctx = withTurnState(ctx, turnState)
 ctx = WithAgentLoop(ctx, agentLoop)
+ctx = withTurnState(ctx, turnState)
 ```
 
 ### Independent Child Context

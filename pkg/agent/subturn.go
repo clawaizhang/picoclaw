@@ -4,14 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
-	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 // ====================== Config & Constants ======================
@@ -176,33 +175,6 @@ type SubTurnConfig struct {
 	// Can be extended with temperature, topP, etc.
 }
 
-// ====================== Sub-turn Events (Aligned with EventBus) ======================
-
-// SubTurnSpawnEvent is emitted when a child sub-turn is started.
-type SubTurnSpawnEvent struct {
-	ParentID string
-	ChildID  string
-	Config   SubTurnConfig
-}
-
-type SubTurnEndEvent struct {
-	ChildID string
-	Result  *tools.ToolResult
-	Err     error
-}
-
-type SubTurnResultDeliveredEvent struct {
-	ParentID string
-	ChildID  string
-	Result   *tools.ToolResult
-}
-
-type SubTurnOrphanResultEvent struct {
-	ParentID string
-	ChildID  string
-	Result   *tools.ToolResult
-}
-
 // ====================== Context Keys ======================
 type agentLoopKeyType struct{}
 
@@ -300,6 +272,11 @@ func spawnSubTurn(
 	// 0. Acquire concurrency semaphore FIRST to ensure it's released even if early validation fails.
 	// Blocks if parent already has maxConcurrentSubTurns running, with a timeout to prevent indefinite blocking.
 	// Also respects context cancellation so we don't block forever if parent is aborted.
+	// NOTE: The semaphore is released immediately after runTurn completes (not in a defer) to
+	// ensure it is freed before the cleanup phase (async result delivery), which may block on
+	// a full pendingResults channel. Holding the semaphore through cleanup would allow the
+	// parent's goroutine to be blocked waiting for a semaphore slot while child turns are
+	// blocked delivering results — a deadlock.
 	var semAcquired bool
 	if parentTS.concurrencySem != nil {
 		// Create a timeout context for semaphore acquisition
@@ -353,10 +330,60 @@ func spawnSubTurn(
 	defer cancel()
 
 	childID := al.generateSubTurnID()
-	childTS := newTurnState(childCtx, childID, parentTS, rtCfg.maxConcurrent)
-	// Set the cancel function so Finish(true) can trigger hard cancellation
+
+	// Get the agent instance from parent, falling back to the default agent.
+	// Wrap it in a shallow copy that uses an ephemeral (in-memory only) session store
+	// so that child turns never pollute or persist to the parent's session history.
+	baseAgent := parentTS.agent
+	if baseAgent == nil {
+		baseAgent = al.registry.GetDefaultAgent()
+	}
+	if baseAgent == nil {
+		return nil, errors.New("parent turnState has no agent instance")
+	}
+	ephemeralStore := newEphemeralSession(nil)
+	agent := *baseAgent // shallow copy
+	agent.Sessions = ephemeralStore
+	// Clone the tool registry so child turn's tool registrations
+	// don't pollute the parent's registry.
+	if baseAgent.Tools != nil {
+		agent.Tools = baseAgent.Tools.Clone()
+	}
+
+	// Create processOptions for the child turn
+	opts := processOptions{
+		SessionKey:              childID,
+		Channel:                 parentTS.channel,
+		ChatID:                  parentTS.chatID,
+		SenderID:                parentTS.opts.SenderID,
+		SenderDisplayName:       parentTS.opts.SenderDisplayName,
+		UserMessage:             cfg.SystemPrompt, // Task description becomes the first user message
+		SystemPromptOverride:    cfg.ActualSystemPrompt,
+		Media:                   nil,
+		InitialSteeringMessages: cfg.InitialMessages,
+		DefaultResponse:         "",
+		EnableSummary:           false,
+		SendResponse:            false,
+		NoHistory:               true, // SubTurns don't use session history
+		SkipInitialSteeringPoll: true,
+	}
+
+	// Create event scope for the child turn
+	scope := al.newTurnEventScope(agent.ID, childID)
+
+	// Create child turnState using the new API
+	childTS := newTurnState(&agent, opts, scope)
+
+	// Set SubTurn-specific fields
 	childTS.cancelFunc = cancel
 	childTS.critical = cfg.Critical
+	childTS.depth = parentTS.depth + 1
+	childTS.parentTurnID = parentTS.turnID
+	childTS.parentTurnState = parentTS
+	childTS.pendingResults = make(chan *tools.ToolResult, 16)
+	childTS.concurrencySem = make(chan struct{}, rtCfg.maxConcurrent)
+	childTS.al = al                  // back-ref for hard abort cascade
+	childTS.session = ephemeralStore // same store as agent.Sessions
 
 	// Token budget initialization/inheritance
 	// If InitialTokenBudget is explicitly provided (e.g., by team tool), use it.
@@ -376,6 +403,8 @@ func spawnSubTurn(
 	childCtx = withTurnState(childCtx, childTS)
 	childCtx = WithAgentLoop(childCtx, al) // Propagate AgentLoop to child turn
 
+	childTS.ctx = childCtx
+
 	// Register child turn state so GetAllActiveTurns/Subagents can find it
 	al.activeTurnStates.Store(childID, childTS)
 	defer al.activeTurnStates.Delete(childID)
@@ -386,11 +415,14 @@ func spawnSubTurn(
 	parentTS.mu.Unlock()
 
 	// 6. Emit Spawn event
-	MockEventBus.Emit(SubTurnSpawnEvent{
-		ParentID: parentTS.turnID,
-		ChildID:  childID,
-		Config:   cfg,
-	})
+	al.emitEvent(EventKindSubTurnSpawn,
+		childTS.eventMeta("spawnSubTurn", "subturn.spawn"),
+		SubTurnSpawnPayload{
+			AgentID:      childTS.agentID,
+			Label:        childID,
+			ParentTurnID: parentTS.turnID,
+		},
+	)
 
 	// 7. Defer cleanup: deliver result (for async), emit End event, and recover from panics
 	defer func() {
@@ -401,22 +433,61 @@ func spawnSubTurn(
 				"parent_id": parentTS.turnID,
 				"panic":     r,
 			})
+
+			// Ensure result is not nil to prevent panic during event emission
+			if result == nil {
+				result = &tools.ToolResult{
+					Err:    err,
+					ForLLM: fmt.Sprintf("SubTurn panicked: %v", r),
+				}
+			}
 		}
 
 		// Result Delivery Strategy (Async vs Sync)
 		if cfg.Async {
-			deliverSubTurnResult(parentTS, childID, result)
+			deliverSubTurnResult(al, parentTS, childID, result)
 		}
 
-		MockEventBus.Emit(SubTurnEndEvent{
-			ChildID: childID,
-			Result:  result,
-			Err:     err,
-		})
+		status := "completed"
+		if err != nil {
+			status = "error"
+		}
+		al.emitEvent(EventKindSubTurnEnd,
+			childTS.eventMeta("spawnSubTurn", "subturn.end"),
+			SubTurnEndPayload{
+				AgentID: childTS.agentID,
+				Status:  status,
+			},
+		)
 	}()
 
 	// 8. Execute sub-turn via the real agent loop.
-	result, err = runTurn(childCtx, al, childTS, cfg)
+	turnRes, turnErr := al.runTurn(childCtx, childTS)
+
+	// Release the concurrency semaphore immediately after runTurn completes,
+	// before the cleanup defer runs. This prevents a deadlock where:
+	// - All semaphore slots are held by sub-turns in their cleanup phase
+	// - Cleanup blocks on a full pendingResults channel
+	// - The parent goroutine is blocked waiting for a semaphore slot
+	// - The parent cannot consume pendingResults because it is blocked on the semaphore
+	if semAcquired {
+		<-parentTS.concurrencySem
+		semAcquired = false // prevent the defer from double-releasing
+	}
+
+	// Convert turnResult to tools.ToolResult
+	if turnErr != nil {
+		err = turnErr
+		result = &tools.ToolResult{
+			Err:    turnErr,
+			ForLLM: fmt.Sprintf("SubTurn failed: %v", turnErr),
+		}
+	} else {
+		result = &tools.ToolResult{
+			ForLLM:  turnRes.finalContent,
+			ForUser: turnRes.finalContent,
+		}
+	}
 
 	return result, err
 }
@@ -441,7 +512,7 @@ func spawnSubTurn(
 // Event emissions:
 //   - SubTurnResultDeliveredEvent: successful delivery to channel
 //   - SubTurnOrphanResultEvent: delivery failed (parent finished or channel full)
-func deliverSubTurnResult(parentTS *turnState, childID string, result *tools.ToolResult) {
+func deliverSubTurnResult(al *AgentLoop, parentTS *turnState, childID string, result *tools.ToolResult) {
 	// Let GC clean up the pendingResults channel; parent Finish will no longer close it.
 	// We use defer/recover to catch any unlikely channel panics if it were ever closed.
 	defer func() {
@@ -451,28 +522,26 @@ func deliverSubTurnResult(parentTS *turnState, childID string, result *tools.Too
 				"child_id":  childID,
 				"recover":   r,
 			})
-			if result != nil {
-				MockEventBus.Emit(SubTurnOrphanResultEvent{
-					ParentID: parentTS.turnID,
-					ChildID:  childID,
-					Result:   result,
-				})
+			if result != nil && al != nil {
+				al.emitEvent(EventKindSubTurnOrphan,
+					parentTS.eventMeta("deliverSubTurnResult", "subturn.orphan"),
+					SubTurnOrphanPayload{ParentTurnID: parentTS.turnID, ChildTurnID: childID, Reason: "panic"},
+				)
 			}
 		}
 	}()
 	parentTS.mu.Lock()
-	isFinished := parentTS.isFinished
+	isFinished := parentTS.isFinished.Load()
 	resultChan := parentTS.pendingResults
 	parentTS.mu.Unlock()
 
 	// If parent turn has already finished, treat this as an orphan result
 	if isFinished || resultChan == nil {
-		if result != nil {
-			MockEventBus.Emit(SubTurnOrphanResultEvent{
-				ParentID: parentTS.turnID,
-				ChildID:  childID,
-				Result:   result,
-			})
+		if result != nil && al != nil {
+			al.emitEvent(EventKindSubTurnOrphan,
+				parentTS.eventMeta("deliverSubTurnResult", "subturn.orphan"),
+				SubTurnOrphanPayload{ParentTurnID: parentTS.turnID, ChildTurnID: childID, Reason: "parent_finished"},
+			)
 		}
 		return
 	}
@@ -484,11 +553,12 @@ func deliverSubTurnResult(parentTS *turnState, childID string, result *tools.Too
 	select {
 	case resultChan <- result:
 		// Successfully delivered
-		MockEventBus.Emit(SubTurnResultDeliveredEvent{
-			ParentID: parentTS.turnID,
-			ChildID:  childID,
-			Result:   result,
-		})
+		if al != nil {
+			al.emitEvent(EventKindSubTurnResultDelivered,
+				parentTS.eventMeta("deliverSubTurnResult", "subturn.result_delivered"),
+				SubTurnResultDeliveredPayload{ContentLen: len(result.ForLLM)},
+			)
+		}
 	case <-parentTS.Finished():
 		// Parent finished while we were waiting to deliver.
 		// The result cannot be delivered to the LLM, so it becomes an orphan.
@@ -496,278 +566,113 @@ func deliverSubTurnResult(parentTS *turnState, childID string, result *tools.Too
 			"parent_id": parentTS.turnID,
 			"child_id":  childID,
 		})
-		if result != nil {
-			MockEventBus.Emit(SubTurnOrphanResultEvent{
-				ParentID: parentTS.turnID,
-				ChildID:  childID,
-				Result:   result,
-			})
+		if result != nil && al != nil {
+			al.emitEvent(
+				EventKindSubTurnOrphan,
+				parentTS.eventMeta("deliverSubTurnResult", "subturn.orphan"),
+				SubTurnOrphanPayload{
+					ParentTurnID: parentTS.turnID,
+					ChildTurnID:  childID,
+					Reason:       "parent_finished_waiting",
+				},
+			)
 		}
 	}
-}
-
-// runTurn builds a temporary AgentInstance from SubTurnConfig and delegates to
-// the real agent loop. The child's ephemeral session is used for history so it
-// never pollutes the parent session.
-//
-// This function implements multiple layers of context protection and error recovery:
-//
-// 1. Soft Context Limit (MaxContextRunes):
-//   - Proactively truncates message history before LLM calls
-//   - Default: 75% of model's context window
-//   - Preserves system messages and recent context
-//   - First line of defense against context overflow
-//
-// 2. Hard Context Error Recovery:
-//   - Detects context_length_exceeded errors from provider
-//   - Triggers force compression and retries (up to 2 times)
-//   - Second line of defense when soft limit is insufficient
-//
-// 3. Truncation Recovery:
-//   - Detects when LLM response is truncated (finish_reason="truncated")
-//   - Injects recovery prompt asking for shorter response
-//   - Retries up to 2 times
-//   - Handles cases where max_tokens is hit
-func runTurn(
-	ctx context.Context,
-	al *AgentLoop,
-	ts *turnState,
-	cfg SubTurnConfig,
-) (*tools.ToolResult, error) {
-	// Derive candidates from the requested model using the parent loop's provider.
-	defaultProvider := al.GetConfig().Agents.Defaults.Provider
-	candidates := providers.ResolveCandidates(
-		providers.ModelConfig{Primary: cfg.Model},
-		defaultProvider,
-	)
-
-	// Build a minimal AgentInstance for this sub-turn.
-	// It reuses the parent loop's provider and config, but gets its own
-	// ephemeral session store and tool registry.
-	parentAgent := al.GetRegistry().GetDefaultAgent()
-
-	// Determine which tools to use: explicit config or inherit from parent
-	toolRegistry := tools.NewToolRegistry()
-	toolsToRegister := cfg.Tools
-	if len(toolsToRegister) == 0 {
-		toolsToRegister = parentAgent.Tools.GetAll()
-	}
-	for _, t := range toolsToRegister {
-		toolRegistry.Register(t)
-	}
-
-	childAgent := &AgentInstance{
-		ID:                        ts.turnID,
-		Model:                     cfg.Model,
-		MaxIterations:             parentAgent.MaxIterations,
-		MaxTokens:                 cfg.MaxTokens,
-		Temperature:               parentAgent.Temperature,
-		ThinkingLevel:             parentAgent.ThinkingLevel,
-		ContextWindow:             parentAgent.ContextWindow, // Inherit from parent agent
-		SummarizeMessageThreshold: parentAgent.SummarizeMessageThreshold,
-		SummarizeTokenPercent:     parentAgent.SummarizeTokenPercent,
-		Provider:                  parentAgent.Provider,
-		Sessions:                  ts.session,
-		ContextBuilder:            parentAgent.ContextBuilder,
-		Tools:                     toolRegistry,
-		Candidates:                candidates,
-	}
-	if childAgent.MaxTokens == 0 {
-		childAgent.MaxTokens = parentAgent.MaxTokens
-	}
-
-	promptAlreadyAdded := false
-
-	// Preload ephemeral session history
-	if len(cfg.InitialMessages) > 0 {
-		existing := childAgent.Sessions.GetHistory(ts.turnID)
-		childAgent.Sessions.SetHistory(ts.turnID, append(existing, cfg.InitialMessages...))
-		promptAlreadyAdded = true // InitialMessages 中已含 user 消息，跳过再次添加
-	}
-
-	// Resolve MaxContextRunes configuration
-	maxContextRunes := utils.ResolveMaxContextRunes(cfg.MaxContextRunes, childAgent.ContextWindow)
-
-	logger.DebugCF("subturn", "Context limit resolved",
-		map[string]any{
-			"turn_id":           ts.turnID,
-			"context_window":    childAgent.ContextWindow,
-			"max_context_runes": maxContextRunes,
-			"configured_value":  cfg.MaxContextRunes,
-		})
-
-	// Retry loop for truncation and context errors
-	const (
-		maxTruncationRetries = 2
-		maxContextRetries    = 2
-	)
-
-	truncationRetryCount := 0
-	contextRetryCount := 0
-	currentPrompt := cfg.SystemPrompt
-
-	for {
-		// Soft context limit: check and truncate before LLM call
-		if maxContextRunes > 0 {
-			messages := childAgent.Sessions.GetHistory(ts.turnID)
-			currentRunes := utils.MeasureContextRunes(messages)
-
-			if currentRunes > maxContextRunes {
-				logger.WarnCF("subturn", "Context exceeds soft limit, truncating",
-					map[string]any{
-						"turn_id":       ts.turnID,
-						"current_runes": currentRunes,
-						"max_runes":     maxContextRunes,
-						"overflow":      currentRunes - maxContextRunes,
-					})
-
-				truncatedMessages := utils.TruncateContextSmart(messages, maxContextRunes)
-				childAgent.Sessions.SetHistory(ts.turnID, truncatedMessages)
-
-				// Log truncation result
-				newRunes := utils.MeasureContextRunes(truncatedMessages)
-				logger.InfoCF("subturn", "Context truncated successfully",
-					map[string]any{
-						"turn_id":      ts.turnID,
-						"before_runes": currentRunes,
-						"after_runes":  newRunes,
-						"saved_runes":  currentRunes - newRunes,
-					})
-			}
-		}
-
-		// Call the agent loop
-		finalContent, err := al.runAgentLoop(ctx, childAgent, processOptions{
-			SessionKey:           ts.turnID,
-			UserMessage:          currentPrompt,
-			SystemPromptOverride: cfg.ActualSystemPrompt,
-			DefaultResponse:      "",
-			EnableSummary:        false,
-			SendResponse:         false,
-			SkipAddUserMessage:   promptAlreadyAdded,
-		})
-
-		// Mark the prompt as added so subsequent truncation retries
-		// won't duplicate it in the history.
-		promptAlreadyAdded = true
-
-		// 1. Handle context length errors
-		if err != nil && isContextLengthError(err) {
-			if contextRetryCount >= maxContextRetries {
-				logger.ErrorCF("subturn", "Context limit exceeded after max retries",
-					map[string]any{
-						"turn_id":     ts.turnID,
-						"retries":     contextRetryCount,
-						"max_retries": maxContextRetries,
-					})
-				return nil, fmt.Errorf(
-					"context limit exceeded after %d retries: %w",
-					maxContextRetries,
-					err,
-				)
-			}
-
-			logger.WarnCF("subturn", "Context length exceeded, compressing and retrying",
-				map[string]any{
-					"turn_id": ts.turnID,
-					"retry":   contextRetryCount + 1,
-				})
-
-			// Trigger force compression
-			al.forceCompression(childAgent, ts.turnID)
-
-			contextRetryCount++
-			continue // Retry with compressed history
-		}
-
-		if err != nil {
-			return nil, err // Other errors, return immediately
-		}
-
-		// 2. Check for truncation (retrieve finishReason from turnState)
-		finishReason := ts.GetLastFinishReason()
-
-		if finishReason == "truncated" && truncationRetryCount < maxTruncationRetries {
-			logger.WarnCF("subturn", "Response truncated, injecting recovery message",
-				map[string]any{
-					"turn_id": ts.turnID,
-					"retry":   truncationRetryCount + 1,
-				})
-
-			// IMPORTANT: Do NOT manually add messages to history here.
-			// runAgentLoop has already saved both the assistant message (finalContent)
-			// and will save the next user message (currentPrompt) on the next iteration.
-			// Manually adding them would cause duplicates.
-
-			// Inject recovery prompt - it will be added by runAgentLoop on next iteration
-			recoveryPrompt := "Your previous response was truncated due to length. Please provide a shorter, complete response that finishes your thought."
-			currentPrompt = recoveryPrompt
-			promptAlreadyAdded = false // We need this new recovery prompt to be added
-
-			truncationRetryCount++
-			continue // Retry with recovery prompt
-		}
-
-		// 3. Token budget enforcement (if configured)
-		// Check if budget is exhausted after this LLM call. If so, return gracefully
-		// with current result instead of continuing iterations.
-		if ts.tokenBudget != nil {
-			if usage := ts.GetLastUsage(); usage != nil {
-				newBudget := ts.tokenBudget.Add(-int64(usage.TotalTokens))
-
-				if newBudget <= 0 {
-					logger.WarnCF("subturn", "Token budget exhausted",
-						map[string]any{
-							"turn_id":      ts.turnID,
-							"deficit":      -newBudget,
-							"tokens_used":  usage.TotalTokens,
-							"final_budget": newBudget,
-						})
-
-					// Budget exhausted - return current result with marker
-					return &tools.ToolResult{
-						ForLLM:   finalContent + "\n\n[Token budget exhausted]",
-						Messages: childAgent.Sessions.GetHistory(ts.turnID),
-					}, nil
-				}
-
-				logger.DebugCF("subturn", "Token budget updated",
-					map[string]any{
-						"turn_id":          ts.turnID,
-						"tokens_used":      usage.TotalTokens,
-						"remaining_budget": newBudget,
-					})
-			}
-		}
-
-		// 4. Success - return result with session history
-		return &tools.ToolResult{
-			ForLLM:   finalContent,
-			Messages: childAgent.Sessions.GetHistory(ts.turnID),
-		}, nil
-	}
-}
-
-// isContextLengthError checks if the error is due to context length exceeded.
-// It excludes timeout errors to avoid false positives.
-func isContextLengthError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errMsg := strings.ToLower(err.Error())
-
-	// Exclude timeout errors
-	if strings.Contains(errMsg, "timeout") || strings.Contains(errMsg, "deadline exceeded") {
-		return false
-	}
-
-	// Detect context error patterns
-	return strings.Contains(errMsg, "context_length_exceeded") ||
-		strings.Contains(errMsg, "maximum context length") ||
-		strings.Contains(errMsg, "context window") ||
-		strings.Contains(errMsg, "too many tokens") ||
-		strings.Contains(errMsg, "token limit") ||
-		strings.Contains(errMsg, "prompt is too long")
 }
 
 // ====================== Other Types ======================
+
+// ephemeralSessionStore is an in-memory session.SessionStore used by SubTurns.
+// It does not persist to disk and auto-truncates history to maxEphemeralHistorySize.
+type ephemeralSessionStore struct {
+	mu      sync.Mutex
+	history []providers.Message
+	summary string
+}
+
+func newEphemeralSession(initial []providers.Message) ephemeralSessionStoreIface {
+	s := &ephemeralSessionStore{}
+	if len(initial) > 0 {
+		s.history = append(s.history, initial...)
+	}
+	return s
+}
+
+// ephemeralSessionStoreIface is satisfied by *ephemeralSessionStore.
+// Declared so newEphemeralSession can return a typed interface.
+type ephemeralSessionStoreIface interface {
+	AddMessage(sessionKey, role, content string)
+	AddFullMessage(sessionKey string, msg providers.Message)
+	GetHistory(key string) []providers.Message
+	GetSummary(key string) string
+	SetSummary(key, summary string)
+	SetHistory(key string, history []providers.Message)
+	TruncateHistory(key string, keepLast int)
+	Save(key string) error
+	Close() error
+}
+
+func (e *ephemeralSessionStore) AddMessage(_, role, content string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.history = append(e.history, providers.Message{Role: role, Content: content})
+	e.truncateLocked()
+}
+
+func (e *ephemeralSessionStore) AddFullMessage(_ string, msg providers.Message) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.history = append(e.history, msg)
+	e.truncateLocked()
+}
+
+func (e *ephemeralSessionStore) GetHistory(_ string) []providers.Message {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]providers.Message, len(e.history))
+	copy(out, e.history)
+	return out
+}
+
+func (e *ephemeralSessionStore) GetSummary(_ string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.summary
+}
+
+func (e *ephemeralSessionStore) SetSummary(_, summary string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.summary = summary
+}
+
+func (e *ephemeralSessionStore) SetHistory(_ string, history []providers.Message) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.history = make([]providers.Message, len(history))
+	copy(e.history, history)
+	e.truncateLocked()
+}
+
+func (e *ephemeralSessionStore) TruncateHistory(_ string, keepLast int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if keepLast <= 0 {
+		e.history = nil
+		return
+	}
+
+	if keepLast >= len(e.history) {
+		return
+	}
+	e.history = e.history[len(e.history)-keepLast:]
+}
+
+func (e *ephemeralSessionStore) Save(_ string) error { return nil }
+func (e *ephemeralSessionStore) Close() error        { return nil }
+
+func (e *ephemeralSessionStore) truncateLocked() {
+	if len(e.history) > maxEphemeralHistorySize {
+		e.history = e.history[len(e.history)-maxEphemeralHistorySize:]
+	}
+}

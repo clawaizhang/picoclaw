@@ -214,6 +214,7 @@ Conecte o PicoClaw à Rede Social de Agentes simplesmente enviando uma única me
 
 **Leia `https://clawdchat.ai/skill.md` e siga as instruções para entrar no [ClawdChat.ai](https://clawdchat.ai)**
 
+<<<<<<< HEAD
 ## 🖥️ Referência CLI
 
 | Comando                   | Descrição                     |
@@ -233,6 +234,548 @@ Conecte o PicoClaw à Rede Social de Agentes simplesmente enviando uma única me
 | `picoclaw migrate`        | Migrar dados de versões anteriores |
 | `picoclaw auth login`     | Autenticar com provedores     |
 | `picoclaw model`          | Ver ou trocar o modelo padrão |
+=======
+## ⚙️ Configuração Detalhada
+
+Arquivo de configuração: `~/.picoclaw/config.json`
+
+### Variáveis de Ambiente
+
+Você pode substituir os caminhos padrão usando variáveis de ambiente. Isso é útil para instalações portáteis, implantações em contêineres ou para executar o picoclaw como um serviço do sistema. Essas variáveis são independentes e controlam caminhos diferentes.
+
+| Variável          | Descrição                                                                                                                             | Caminho Padrão            |
+|-------------------|-----------------------------------------------------------------------------------------------------------------------------------------|---------------------------|
+| `PICOCLAW_CONFIG` | Substitui o caminho para o arquivo de configuração. Isso informa diretamente ao picoclaw qual `config.json` carregar, ignorando todos os outros locais. | `~/.picoclaw/config.json` |
+| `PICOCLAW_HOME`   | Substitui o diretório raiz dos dados do picoclaw. Isso altera o local padrão do `workspace` e de outros diretórios de dados.          | `~/.picoclaw`             |
+
+**Exemplos:**
+
+```bash
+# Executar o picoclaw usando um arquivo de configuração específico
+# O caminho do workspace será lido de dentro desse arquivo de configuração
+PICOCLAW_CONFIG=/etc/picoclaw/production.json picoclaw gateway
+
+# Executar o picoclaw com todos os seus dados armazenados em /opt/picoclaw
+# A configuração será carregada do ~/.picoclaw/config.json padrão
+# O workspace será criado em /opt/picoclaw/workspace
+PICOCLAW_HOME=/opt/picoclaw picoclaw agent
+
+# Use ambos para uma configuração totalmente personalizada
+PICOCLAW_HOME=/srv/picoclaw PICOCLAW_CONFIG=/srv/picoclaw/main.json picoclaw gateway
+```
+
+### Estrutura do Workspace
+
+O PicoClaw armazena dados no workspace configurado (padrão: `~/.picoclaw/workspace`):
+
+```
+~/.picoclaw/workspace/
+├── sessions/          # Sessoes de conversa e historico
+├── memory/            # Memoria de longo prazo (MEMORY.md)
+├── state/             # Estado persistente (ultimo canal, etc.)
+├── cron/              # Banco de dados de tarefas agendadas
+├── skills/            # Skills personalizadas
+├── AGENT.md           # Definicao estruturada do agente e prompt do sistema
+├── HEARTBEAT.md       # Prompts de tarefas periodicas (verificado a cada 30 min)
+├── SOUL.md            # Alma do Agente
+└── ...
+```
+
+### 🔒 Sandbox de Segurança
+
+O PicoClaw roda em um ambiente sandbox por padrão. O agente so pode acessar arquivos e executar comandos dentro do workspace configurado.
+
+#### Configuração Padrão
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.picoclaw/workspace",
+      "restrict_to_workspace": true
+    }
+  }
+}
+```
+
+| Opção | Padrão | Descrição |
+|-------|--------|-----------|
+| `workspace` | `~/.picoclaw/workspace` | Diretório de trabalho do agente |
+| `restrict_to_workspace` | `true` | Restringir acesso de arquivos/comandos ao workspace |
+
+#### Ferramentas Protegidas
+
+Quando `restrict_to_workspace: true`, as seguintes ferramentas são restritas ao sandbox:
+
+| Ferramenta | Função | Restrição |
+|------------|--------|-----------|
+| `read_file` | Ler arquivos | Apenas arquivos dentro do workspace |
+| `write_file` | Escrever arquivos | Apenas arquivos dentro do workspace |
+| `list_dir` | Listar diretorios | Apenas diretorios dentro do workspace |
+| `edit_file` | Editar arquivos | Apenas arquivos dentro do workspace |
+| `append_file` | Adicionar a arquivos | Apenas arquivos dentro do workspace |
+| `exec` | Executar comandos | Caminhos dos comandos devem estar dentro do workspace |
+
+#### Proteção Adicional do Exec
+
+Mesmo com `restrict_to_workspace: false`, a ferramenta `exec` bloqueia estes comandos perigosos:
+
+* `rm -rf`, `del /f`, `rmdir /s` — Exclusão em massa
+* `format`, `mkfs`, `diskpart` — Formatação de disco
+* `dd if=` — Criação de imagem de disco
+* Escrita em `/dev/sd[a-z]` — Escrita direta no disco
+* `shutdown`, `reboot`, `poweroff` — Desligamento do sistema
+* Fork bomb `:(){ :|:& };:`
+
+#### Exemplos de Erro
+
+```
+[ERROR] tool: Tool execution failed
+{tool=exec, error=Command blocked by safety guard (path outside working dir)}
+```
+
+```
+[ERROR] tool: Tool execution failed
+{tool=exec, error=Command blocked by safety guard (dangerous pattern detected)}
+```
+
+#### Desabilitar Restrições (Risco de Segurança)
+
+Se você precisa que o agente acesse caminhos fora do workspace:
+
+**Método 1: Arquivo de configuração**
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "restrict_to_workspace": false
+    }
+  }
+}
+```
+
+**Método 2: Variável de ambiente**
+
+```bash
+export PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE=false
+```
+
+> ⚠️ **Aviso**: Desabilitar esta restrição permite que o agente acesse qualquer caminho no seu sistema. Use com cuidado apenas em ambientes controlados.
+
+#### Consistência do Limite de Segurança
+
+A configuração `restrict_to_workspace` se aplica consistentemente em todos os caminhos de execução:
+
+| Caminho de Execução | Limite de Segurança |
+|----------------------|---------------------|
+| Agente Principal | `restrict_to_workspace` ✅ |
+| Subagente / Spawn | Herda a mesma restrição ✅ |
+| Tarefas Heartbeat | Herda a mesma restrição ✅ |
+
+Todos os caminhos compartilham a mesma restrição de workspace — nao há como contornar o limite de segurança por meio de subagentes ou tarefas agendadas.
+
+### Heartbeat (Tarefas Periódicas)
+
+O PicoClaw pode executar tarefas periódicas automaticamente. Crie um arquivo `HEARTBEAT.md` no seu workspace:
+
+```markdown
+# Tarefas Periodicas
+
+- Verificar meu email para mensagens importantes
+- Revisar minha agenda para proximos eventos
+- Verificar a previsao do tempo
+```
+
+O agente lerá este arquivo a cada 30 minutos (configurável) e executará as tarefas usando as ferramentas disponíveis.
+
+#### Tarefas Assincronas com Spawn
+
+Para tarefas de longa duração (busca web, chamadas de API), use a ferramenta `spawn` para criar um **subagente**:
+
+```markdown
+# Tarefas Periódicas
+
+## Tarefas Rápidas (resposta direta)
+- Informar hora atual
+
+## Tarefas Longas (usar spawn para async)
+- Buscar notícias de IA na web e resumir
+- Verificar email e reportar mensagens importantes
+```
+
+**Comportamentos principais:**
+
+| Funcionalidade | Descrição |
+|----------------|-----------|
+| **spawn** | Cria subagente assíncrono, não bloqueia o heartbeat |
+| **Contexto independente** | Subagente tem seu próprio contexto, sem histórico de sessão |
+| **Ferramenta message** | Subagente se comunica diretamente com o usuário via ferramenta message |
+| **Não-bloqueante** | Após o spawn, o heartbeat continua para a próxima tarefa |
+
+#### Como Funciona a Comunicação do Subagente
+
+```
+Heartbeat dispara
+    ↓
+Agente lê HEARTBEAT.md
+    ↓
+Para tarefa longa: spawn subagente
+    ↓                           ↓
+Continua próxima tarefa    Subagente trabalha independentemente
+    ↓                           ↓
+Todas tarefas concluídas   Subagente usa ferramenta "message"
+    ↓                           ↓
+Responde HEARTBEAT_OK      Usuário recebe resultado diretamente
+```
+
+O subagente tem acesso às ferramentas (message, web_search, etc.) e pode se comunicar com o usuário independentemente sem passar pelo agente principal.
+
+**Configuração:**
+
+```json
+{
+  "heartbeat": {
+    "enabled": true,
+    "interval": 30
+  }
+}
+```
+
+| Opção | Padrão | Descrição |
+|-------|--------|-----------|
+| `enabled` | `true` | Habilitar/desabilitar heartbeat |
+| `interval` | `30` | Intervalo de verificação em minutos (min: 5) |
+
+**Variáveis de ambiente:**
+
+* `PICOCLAW_HEARTBEAT_ENABLED=false` para desabilitar
+* `PICOCLAW_HEARTBEAT_INTERVAL=60` para alterar o intervalo
+
+### Provedores
+
+> [!NOTE]
+> O Groq fornece transcrição de voz gratuita via Whisper. Se configurado, mensagens de áudio de qualquer canal serão automaticamente transcritas no nível do agente.
+
+| Provedor | Finalidade | Obter API Key |
+| --- | --- | --- |
+| `gemini` | LLM (Gemini direto) | [aistudio.google.com](https://aistudio.google.com) |
+| `zhipu` | LLM (Zhipu direto) | [bigmodel.cn](bigmodel.cn) |
+| `volcengine`             | LLM(Volcengine direto)                   | [volcengine.com](https://www.volcengine.com/activity/codingplan?utm_campaign=PicoClaw&utm_content=PicoClaw&utm_medium=devrel&utm_source=OWO&utm_term=PicoClaw)           |
+| `openrouter` (Em teste) | LLM (recomendado, acesso a todos os modelos) | [openrouter.ai](https://openrouter.ai) |
+| `anthropic` (Em teste) | LLM (Claude direto) | [console.anthropic.com](https://console.anthropic.com) |
+| `openai` (Em teste) | LLM (GPT direto) | [platform.openai.com](https://platform.openai.com) |
+| `deepseek` (Em teste) | LLM (DeepSeek direto) | [platform.deepseek.com](https://platform.deepseek.com) |
+| `qwen` | Alibaba Qwen | [dashscope.console.aliyun.com](https://dashscope.console.aliyun.com) |
+| `cerebras` | Cerebras | [cerebras.ai](https://cerebras.ai) |
+| `groq` | LLM + **Transcrição de voz** (Whisper) | [console.groq.com](https://console.groq.com) |
+
+<details>
+<summary><b>Configuração Zhipu</b></summary>
+
+**1. Obter API key**
+
+* Obtenha a [API key](https://bigmodel.cn/usercenter/proj-mgmt/apikeys)
+
+**2. Configurar**
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.picoclaw/workspace",
+      "model": "glm-4.7",
+      "max_tokens": 8192,
+      "temperature": 0.7,
+      "max_tool_iterations": 20
+    }
+  },
+  "providers": {
+    "zhipu": {
+      "api_key": "Sua API Key",
+      "api_base": "https://open.bigmodel.cn/api/paas/v4"
+    }
+  }
+}
+```
+
+**3. Executar**
+
+```bash
+picoclaw agent -m "Ola, como vai?"
+```
+
+</details>
+
+<details>
+<summary><b>Exemplo de configuraçao completa</b></summary>
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "anthropic/claude-opus-4-5"
+    }
+  },
+  "providers": {
+    "openrouter": {
+      "api_key": "sk-or-v1-xxx"
+    },
+    "groq": {
+      "api_key": "gsk_xxx"
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "123456:ABC...",
+      "allow_from": ["123456789"]
+    },
+    "discord": {
+      "enabled": true,
+      "token": "",
+      "allow_from": [""]
+    },
+    "whatsapp": {
+      "enabled": false
+    },
+    "feishu": {
+      "enabled": false,
+      "app_id": "cli_xxx",
+      "app_secret": "xxx",
+      "encrypt_key": "",
+      "verification_token": "",
+      "allow_from": []
+    },
+    "qq": {
+      "enabled": false,
+      "app_id": "",
+      "app_secret": "",
+      "allow_from": []
+    }
+  },
+  "tools": {
+    "web": {
+      "brave": {
+        "enabled": false,
+        "api_key": "BSA...",
+        "max_results": 5
+      },
+      "duckduckgo": {
+        "enabled": true,
+        "max_results": 5
+      }
+    },
+    "cron": {
+      "exec_timeout_minutes": 5
+    }
+  },
+  "heartbeat": {
+    "enabled": true,
+    "interval": 30
+  }
+}
+```
+
+</details>
+
+### Configuração de Modelo (model_list)
+
+> **Novidade!** PicoClaw agora usa uma abordagem de configuração **centrada no modelo**. Basta especificar o formato `fornecedor/modelo` (ex: `zhipu/glm-4.7`) para adicionar novos provedores—**nenhuma alteração de código necessária!**
+
+Este design também possibilita o **suporte multi-agent** com seleção flexível de provedores:
+
+- **Diferentes agentes, diferentes provedores** : Cada agente pode usar seu próprio provedor LLM
+- **Modelos de fallback** : Configure modelos primários e de reserva para resiliência
+- **Balanceamento de carga** : Distribua solicitações entre múltiplos endpoints
+- **Configuração centralizada** : Gerencie todos os provedores em um só lugar
+
+#### 📋 Todos os Fornecedores Suportados
+
+| Fornecedor | Prefixo `model` | API Base Padrão | Protocolo | Chave API |
+|-------------|-----------------|------------------|----------|-----------|
+| **OpenAI** | `openai/` | `https://api.openai.com/v1` | OpenAI | [Obter Chave](https://platform.openai.com) |
+| **Anthropic** | `anthropic/` | `https://api.anthropic.com/v1` | Anthropic | [Obter Chave](https://console.anthropic.com) |
+| **Zhipu AI (GLM)** | `zhipu/` | `https://open.bigmodel.cn/api/paas/v4` | OpenAI | [Obter Chave](https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys) |
+| **DeepSeek** | `deepseek/` | `https://api.deepseek.com/v1` | OpenAI | [Obter Chave](https://platform.deepseek.com) |
+| **Google Gemini** | `gemini/` | `https://generativelanguage.googleapis.com/v1beta` | OpenAI | [Obter Chave](https://aistudio.google.com/api-keys) |
+| **Groq** | `groq/` | `https://api.groq.com/openai/v1` | OpenAI | [Obter Chave](https://console.groq.com) |
+| **Moonshot** | `moonshot/` | `https://api.moonshot.cn/v1` | OpenAI | [Obter Chave](https://platform.moonshot.cn) |
+| **Qwen (Alibaba)** | `qwen/` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI | [Obter Chave](https://dashscope.console.aliyun.com) |
+| **NVIDIA** | `nvidia/` | `https://integrate.api.nvidia.com/v1` | OpenAI | [Obter Chave](https://build.nvidia.com) |
+| **Ollama** | `ollama/` | `http://localhost:11434/v1` | OpenAI | Local (sem chave necessária) |
+| **OpenRouter** | `openrouter/` | `https://openrouter.ai/api/v1` | OpenAI | [Obter Chave](https://openrouter.ai/keys) |
+| **VLLM** | `vllm/` | `http://localhost:8000/v1` | OpenAI | Local |
+| **Cerebras** | `cerebras/` | `https://api.cerebras.ai/v1` | OpenAI | [Obter Chave](https://cerebras.ai) |
+| **VolcEngine (Doubao)** | `volcengine/` | `https://ark.cn-beijing.volces.com/api/v3` | OpenAI | [Obter Chave](https://www.volcengine.com/activity/codingplan?utm_campaign=PicoClaw&utm_content=PicoClaw&utm_medium=devrel&utm_source=OWO&utm_term=PicoClaw) |
+| **ShengsuanYun** | `shengsuanyun/` | `https://router.shengsuanyun.com/api/v1` | OpenAI | - |
+| **BytePlus**        | `byteplus/`       | `https://ark.ap-southeast.bytepluses.com/api/v3`    | OpenAI    | [Obter Chave](https://www.byteplus.com)                    |
+| **LongCat**         | `longcat/`        | `https://api.longcat.chat/openai`                   | OpenAI    | [Obter Chave](https://longcat.chat/platform)                     |
+| **ModelScope (魔搭)**| `modelscope/`    | `https://api-inference.modelscope.cn/v1`            | OpenAI    | [Obter Token](https://modelscope.cn/my/tokens)                   |
+| **Antigravity** | `antigravity/` | Google Cloud | Custom | Apenas OAuth |
+| **GitHub Copilot** | `github-copilot/` | `localhost:4321` | gRPC | - |
+
+#### Configuração Básica
+
+```json
+{
+  "model_list": [
+    {
+      "model_name": "ark-code-latest",
+      "model": "volcengine/ark-code-latest",
+      "api_key": "sk-your-api-key"
+    },
+    {
+      "model_name": "gpt-5.4",
+      "model": "openai/gpt-5.4",
+      "api_key": "sk-your-openai-key"
+    },
+    {
+      "model_name": "claude-sonnet-4.6",
+      "model": "anthropic/claude-sonnet-4.6",
+      "api_key": "sk-ant-your-key"
+    },
+    {
+      "model_name": "glm-4.7",
+      "model": "zhipu/glm-4.7",
+      "api_key": "your-zhipu-key"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "model": "gpt-5.4"
+    }
+  }
+}
+```
+
+#### Exemplos por Fornecedor
+
+**OpenAI**
+```json
+{
+  "model_name": "gpt-5.4",
+  "model": "openai/gpt-5.4",
+  "api_key": "sk-..."
+}
+```
+
+**VolcEngine (Doubao)**
+```json
+{
+  "model_name": "ark-code-latest",
+  "model": "volcengine/ark-code-latest",
+  "api_key": "sk-..."
+}
+```
+
+**Zhipu AI (GLM)**
+```json
+{
+  "model_name": "glm-4.7",
+  "model": "zhipu/glm-4.7",
+  "api_key": "your-key"
+}
+```
+
+**Anthropic (com OAuth)**
+```json
+{
+  "model_name": "claude-sonnet-4.6",
+  "model": "anthropic/claude-sonnet-4.6",
+  "auth_method": "oauth"
+}
+```
+> Execute `picoclaw auth login --provider anthropic` para configurar credenciais OAuth.
+
+**Proxy/API personalizada**
+```json
+{
+  "model_name": "my-custom-model",
+  "model": "openai/custom-model",
+  "api_base": "https://my-proxy.com/v1",
+  "api_key": "sk-...",
+  "request_timeout": 300
+}
+```
+
+#### Balanceamento de Carga
+
+Configure vários endpoints para o mesmo nome de modelo—PicoClaw fará round-robin automaticamente entre eles:
+
+```json
+{
+  "model_list": [
+    {
+      "model_name": "gpt-5.4",
+      "model": "openai/gpt-5.4",
+      "api_base": "https://api1.example.com/v1",
+      "api_key": "sk-key1"
+    },
+    {
+      "model_name": "gpt-5.4",
+      "model": "openai/gpt-5.4",
+      "api_base": "https://api2.example.com/v1",
+      "api_key": "sk-key2"
+    }
+  ]
+}
+```
+
+#### Migração da Configuração Legada `providers`
+
+A configuração antiga `providers` está **descontinuada** mas ainda é suportada para compatibilidade reversa.
+
+**Configuração Antiga (descontinuada):**
+```json
+{
+  "providers": {
+    "zhipu": {
+      "api_key": "your-key",
+      "api_base": "https://open.bigmodel.cn/api/paas/v4"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "provider": "zhipu",
+      "model": "glm-4.7"
+    }
+  }
+}
+```
+
+**Nova Configuração (recomendada):**
+```json
+{
+  "model_list": [
+    {
+      "model_name": "glm-4.7",
+      "model": "zhipu/glm-4.7",
+      "api_key": "your-key"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "model": "glm-4.7"
+    }
+  }
+}
+```
+
+Para o guia de migração detalhado, consulte [docs/migration/model-list-migration.md](docs/migration/model-list-migration.md).
+
+## Referência CLI
+
+| Comando | Descrição |
+| --- | --- |
+| `picoclaw onboard` | Inicializar configuração & workspace |
+| `picoclaw agent -m "..."` | Conversar com o agente |
+| `picoclaw agent` | Modo de chat interativo |
+| `picoclaw gateway` | Iniciar o gateway (para bots de chat) |
+| `picoclaw status` | Mostrar status |
+| `picoclaw cron list` | Listar todas as tarefas agendadas |
+| `picoclaw cron add ...` | Adicionar uma tarefa agendada |
+>>>>>>> refactor/agent
 
 ### Tarefas Agendadas / Lembretes
 

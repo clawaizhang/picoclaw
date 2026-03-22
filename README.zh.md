@@ -209,6 +209,7 @@ make install
 
 ## <img src="assets/clawdchat-icon.png" width="24" height="24" alt="ClawdChat"> 加入 Agent 社交网络
 
+<<<<<<< HEAD
 通过 CLI 或任何已集成的聊天应用发送一条消息，即可将 PicoClaw 连接到 Agent 社交网络。
 
 **阅读 `https://clawdchat.ai/skill.md` 并按照说明加入 [ClawdChat.ai](https://clawdchat.ai)**
@@ -234,6 +235,537 @@ make install
 | `picoclaw model`          | 查看或切换默认模型 |
 
 ### 定时任务 / 提醒
+=======
+只需通过 CLI 或任何集成的聊天应用发送一条消息，即可将 PicoClaw 连接到 Agent 社交网络。
+
+\*\*阅读 `https://clawdchat.ai/skill.md` 并按照说明加入 [ClawdChat.ai](https://clawdchat.ai)
+
+## ⚙️ 配置详解
+
+配置文件路径: `~/.picoclaw/config.json`
+
+### 环境变量
+
+你可以使用环境变量覆盖默认路径。这对于便携安装、容器化部署或将 picoclaw 作为系统服务运行非常有用。这些变量是独立的，控制不同的路径。
+
+| 变量              | 描述                                                                                                                             | 默认路径                  |
+|-------------------|-----------------------------------------------------------------------------------------------------------------------------------------|---------------------------|
+| `PICOCLAW_CONFIG` | 覆盖配置文件的路径。这直接告诉 picoclaw 加载哪个 `config.json`，忽略所有其他位置。 | `~/.picoclaw/config.json` |
+| `PICOCLAW_HOME`   | 覆盖 picoclaw 数据根目录。这会更改 `workspace` 和其他数据目录的默认位置。          | `~/.picoclaw`             |
+
+**示例：**
+
+```bash
+# 使用特定的配置文件运行 picoclaw
+# 工作区路径将从该配置文件中读取
+PICOCLAW_CONFIG=/etc/picoclaw/production.json picoclaw gateway
+
+# 在 /opt/picoclaw 中存储所有数据运行 picoclaw
+# 配置将从默认的 ~/.picoclaw/config.json 加载
+# 工作区将在 /opt/picoclaw/workspace 创建
+PICOCLAW_HOME=/opt/picoclaw picoclaw agent
+
+# 同时使用两者进行完全自定义设置
+PICOCLAW_HOME=/srv/picoclaw PICOCLAW_CONFIG=/srv/picoclaw/main.json picoclaw gateway
+```
+
+### 工作区布局 (Workspace Layout)
+
+PicoClaw 将数据存储在您配置的工作区中（默认：`~/.picoclaw/workspace`）：
+
+```
+~/.picoclaw/workspace/
+├── sessions/          # 对话会话和历史
+├── memory/            # 长期记忆 (MEMORY.md)
+├── state/             # 持久化状态 (最后一次频道等)
+├── cron/              # 定时任务数据库
+├── skills/            # 工作区级技能
+├── AGENT.md           # 结构化 Agent 定义与系统提示词
+├── SOUL.md            # Agent 灵魂/性格
+├── USER.md            # 当前工作区的用户资料与偏好
+├── HEARTBEAT.md       # 周期性任务提示词 (每 30 分钟检查一次)
+└── ...
+
+```
+
+### 技能来源 (Skill Sources)
+
+默认情况下，技能会按以下顺序加载：
+
+1. `~/.picoclaw/workspace/skills`（工作区）
+2. `~/.picoclaw/skills`（全局）
+3. `<current-working-directory>/skills`（内置）
+
+在高级/测试场景下，可通过以下环境变量覆盖内置技能目录：
+
+```bash
+export PICOCLAW_BUILTIN_SKILLS=/path/to/skills
+```
+
+### 统一命令执行策略
+
+- 通用斜杠命令通过 `pkg/agent/loop.go` 中的 `commands.Executor` 统一执行。
+- Channel 适配器不再在本地消费通用命令；它们只负责把入站文本转发到 bus/agent 路径。Telegram 仍会在启动时自动注册其支持的命令菜单。
+- 未注册的斜杠命令（例如 `/foo`）会透传给 LLM 按普通输入处理。
+- 已注册但当前 channel 不支持的命令（例如 WhatsApp 上的 `/show`）会返回明确的用户可见错误，并停止后续处理。
+### 心跳 / 周期性任务 (Heartbeat)
+
+PicoClaw 可以自动执行周期性任务。在工作区创建 `HEARTBEAT.md` 文件：
+
+```markdown
+# Periodic Tasks
+
+- Check my email for important messages
+- Review my calendar for upcoming events
+- Check the weather forecast
+```
+
+Agent 将每隔 30 分钟（可配置）读取此文件，并使用可用工具执行任务。
+
+#### 使用 Spawn 的异步任务
+
+对于耗时较长的任务（网络搜索、API 调用），使用 `spawn` 工具创建一个 **子 Agent (subagent)**：
+
+```markdown
+# Periodic Tasks
+
+## Quick Tasks (respond directly)
+
+- Report current time
+
+## Long Tasks (use spawn for async)
+
+- Search the web for AI news and summarize
+- Check email and report important messages
+```
+
+**关键行为：**
+
+| 特性             | 描述                                     |
+| ---------------- | ---------------------------------------- |
+| **spawn**        | 创建异步子 Agent，不阻塞主心跳进程       |
+| **独立上下文**   | 子 Agent 拥有独立上下文，无会话历史      |
+| **message tool** | 子 Agent 通过 message 工具直接与用户通信 |
+| **非阻塞**       | spawn 后，心跳继续处理下一个任务         |
+
+#### 子 Agent 通信原理
+
+```
+心跳触发 (Heartbeat triggers)
+    ↓
+Agent 读取 HEARTBEAT.md
+    ↓
+对于长任务: spawn 子 Agent
+    ↓                           ↓
+继续下一个任务               子 Agent 独立工作
+    ↓                           ↓
+所有任务完成                 子 Agent 使用 "message" 工具
+    ↓                           ↓
+响应 HEARTBEAT_OK            用户直接收到结果
+
+```
+
+子 Agent 可以访问工具（message, web_search 等），并且无需通过主 Agent 即可独立与用户通信。
+
+**配置：**
+
+```json
+{
+  "heartbeat": {
+    "enabled": true,
+    "interval": 30
+  }
+}
+```
+
+| 选项       | 默认值 | 描述                         |
+| ---------- | ------ | ---------------------------- |
+| `enabled`  | `true` | 启用/禁用心跳                |
+| `interval` | `30`   | 检查间隔，单位分钟 (最小: 5) |
+
+**环境变量:**
+
+- `PICOCLAW_HEARTBEAT_ENABLED=false` 禁用
+- `PICOCLAW_HEARTBEAT_INTERVAL=60` 更改间隔
+
+### 提供商 (Providers)
+
+> [!NOTE]
+> Groq 通过 Whisper 提供免费的语音转录。如果配置了 Groq，任意渠道的音频消息都将在 Agent 层面自动转录为文字。
+
+| 提供商               | 用途                         | 获取 API Key                                                         |
+| -------------------- | ---------------------------- | -------------------------------------------------------------------- |
+| `gemini`             | LLM (Gemini 直连)            | [aistudio.google.com](https://aistudio.google.com)                   |
+| `zhipu`              | LLM (智谱直连)               | [bigmodel.cn](bigmodel.cn)                                           |
+| `volcengine` | LLM (火山引擎直连)                  | [volcengine.com](https://www.volcengine.com/activity/codingplan?utm_campaign=PicoClaw&utm_content=PicoClaw&utm_medium=devrel&utm_source=OWO&utm_term=PicoClaw)                 |
+| `openrouter` | LLM (推荐，可访问所有模型)   | [openrouter.ai](https://openrouter.ai)                               |
+| `anthropic`  | LLM (Claude 直连)            | [console.anthropic.com](https://console.anthropic.com)               |
+| `openai`     | LLM (GPT 直连)               | [platform.openai.com](https://platform.openai.com)                   |
+| `deepseek`   | LLM (DeepSeek 直连)          | [platform.deepseek.com](https://platform.deepseek.com)               |
+| `qwen`               | LLM (通义千问)               | [dashscope.console.aliyun.com](https://dashscope.console.aliyun.com) |
+| `groq`               | LLM + **语音转录** (Whisper) | [console.groq.com](https://console.groq.com)                         |
+| `cerebras`           | LLM (Cerebras 直连)          | [cerebras.ai](https://cerebras.ai)                                   |
+
+### 模型配置 (model_list)
+
+> **新功能！** PicoClaw 现在采用**以模型为中心**的配置方式。只需使用 `厂商/模型` 格式（如 `zhipu/glm-4.7`）即可添加新的 provider——**无需修改任何代码！**
+
+该设计同时支持**多 Agent 场景**，提供灵活的 Provider 选择：
+
+- **不同 Agent 使用不同 Provider**：每个 Agent 可以使用自己的 LLM provider
+- **模型回退（Fallback）**：配置主模型和备用模型，提高可靠性
+- **负载均衡**：在多个 API 端点之间分配请求
+- **集中化配置**：在一个地方管理所有 provider
+
+#### 📋 所有支持的厂商
+
+| 厂商                | `model` 前缀      | 默认 API Base                                       | 协议      | 获取 API Key                                                      |
+| ------------------- | ----------------- | --------------------------------------------------- | --------- | ----------------------------------------------------------------- |
+| **OpenAI**          | `openai/`         | `https://api.openai.com/v1`                         | OpenAI    | [获取密钥](https://platform.openai.com)                           |
+| **Anthropic**       | `anthropic/`      | `https://api.anthropic.com/v1`                      | Anthropic | [获取密钥](https://console.anthropic.com)                         |
+| **智谱 AI (GLM)**   | `zhipu/`          | `https://open.bigmodel.cn/api/paas/v4`              | OpenAI    | [获取密钥](https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys) |
+| **DeepSeek**        | `deepseek/`       | `https://api.deepseek.com/v1`                       | OpenAI    | [获取密钥](https://platform.deepseek.com)                         |
+| **Google Gemini**   | `gemini/`         | `https://generativelanguage.googleapis.com/v1beta`  | OpenAI    | [获取密钥](https://aistudio.google.com/api-keys)                  |
+| **Groq**            | `groq/`           | `https://api.groq.com/openai/v1`                    | OpenAI    | [获取密钥](https://console.groq.com)                              |
+| **Moonshot**        | `moonshot/`       | `https://api.moonshot.cn/v1`                        | OpenAI    | [获取密钥](https://platform.moonshot.cn)                          |
+| **通义千问 (Qwen)** | `qwen/`           | `https://dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI    | [获取密钥](https://dashscope.console.aliyun.com)                  |
+| **NVIDIA**          | `nvidia/`         | `https://integrate.api.nvidia.com/v1`               | OpenAI    | [获取密钥](https://build.nvidia.com)                              |
+| **Ollama**          | `ollama/`         | `http://localhost:11434/v1`                         | OpenAI    | 本地（无需密钥）                                                  |
+| **OpenRouter**      | `openrouter/`     | `https://openrouter.ai/api/v1`                      | OpenAI    | [获取密钥](https://openrouter.ai/keys)                            |
+| **VLLM**            | `vllm/`           | `http://localhost:8000/v1`                          | OpenAI    | 本地                                                              |
+| **Cerebras**        | `cerebras/`       | `https://api.cerebras.ai/v1`                        | OpenAI    | [获取密钥](https://cerebras.ai)                                   |
+| **火山引擎（Doubao）**        | `volcengine/`     | `https://ark.cn-beijing.volces.com/api/v3`          | OpenAI    | [获取密钥](https://www.volcengine.com/activity/codingplan?utm_campaign=PicoClaw&utm_content=PicoClaw&utm_medium=devrel&utm_source=OWO&utm_term=PicoClaw)                        |
+| **神算云**          | `shengsuanyun/`   | `https://router.shengsuanyun.com/api/v1`            | OpenAI    | -                                                                 |
+| **BytePlus**        | `byteplus/`       | `https://ark.ap-southeast.bytepluses.com/api/v3`    | OpenAI    | [获取密钥](https://www.byteplus.com)                        |
+| **LongCat**         | `longcat/`        | `https://api.longcat.chat/openai`                   | OpenAI    | [获取密钥](https://longcat.chat/platform)                        |
+| **ModelScope (魔搭)**| `modelscope/`    | `https://api-inference.modelscope.cn/v1`            | OpenAI    | [获取 Token](https://modelscope.cn/my/tokens)                    |
+| **Antigravity**     | `antigravity/`    | Google Cloud                                        | 自定义    | 仅 OAuth                                                          |
+| **GitHub Copilot**  | `github-copilot/` | `localhost:4321`                                    | gRPC      | -                                                                 |
+
+#### 基础配置示例
+
+```json
+{
+  "model_list": [
+    {
+      "model_name": "ark-code-latest",
+      "model": "volcengine/ark-code-latest",
+      "api_key": "sk-your-api-key"
+    },
+    {
+      "model_name": "gpt-5.4",
+      "model": "openai/gpt-5.4",
+      "api_key": "sk-your-openai-key"
+    },
+    {
+      "model_name": "claude-sonnet-4.6",
+      "model": "anthropic/claude-sonnet-4.6",
+      "api_key": "sk-ant-your-key"
+    },
+    {
+      "model_name": "glm-4.7",
+      "model": "zhipu/glm-4.7",
+      "api_key": "your-zhipu-key"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "model": "gpt-5.4"
+    }
+  }
+}
+```
+
+#### 各厂商配置示例
+
+**OpenAI**
+
+```json
+{
+  "model_name": "gpt-5.4",
+  "model": "openai/gpt-5.4",
+  "api_key": "sk-..."
+}
+```
+
+**火山引擎（Doubao）**
+
+```json
+{
+  "model_name": "ark-code-latest",
+  "model": "volcengine/ark-code-latest",
+  "api_key": "sk-..."
+}
+```
+
+**智谱 AI (GLM)**
+
+```json
+{
+  "model_name": "glm-4.7",
+  "model": "zhipu/glm-4.7",
+  "api_key": "your-key"
+}
+```
+
+**DeepSeek**
+
+```json
+{
+  "model_name": "deepseek-chat",
+  "model": "deepseek/deepseek-chat",
+  "api_key": "sk-..."
+}
+```
+
+**Anthropic (使用 OAuth)**
+
+```json
+{
+  "model_name": "claude-sonnet-4.6",
+  "model": "anthropic/claude-sonnet-4.6",
+  "auth_method": "oauth"
+}
+```
+
+> 运行 `picoclaw auth login --provider anthropic` 来设置 OAuth 凭证。
+
+**Anthropic Messages API（原生格式）**
+
+用于直接访问 Anthropic API 或仅支持 Anthropic 原生消息格式的自定义端点：
+
+```json
+{
+  "model_name": "claude-opus-4-6",
+  "model": "anthropic-messages/claude-opus-4-6",
+  "api_key": "sk-ant-your-key",
+  "api_base": "https://api.anthropic.com"
+}
+```
+
+> 使用 `anthropic-messages` 协议的场景：
+> - 使用仅支持 Anthropic 原生 `/v1/messages` 端点的第三方代理（不支持 OpenAI 兼容的 `/v1/chat/completions`）
+> - 连接到 MiniMax、Synthetic 等需要 Anthropic 原生消息格式的服务
+> - 现有的 `anthropic` 协议返回 404 错误（说明端点不支持 OpenAI 兼容格式）
+>
+> **注意：** `anthropic` 协议使用 OpenAI 兼容格式（`/v1/chat/completions`），而 `anthropic-messages` 使用 Anthropic 原生格式（`/v1/messages`）。请根据端点支持的格式选择。
+
+**Ollama (本地)**
+
+```json
+{
+  "model_name": "llama3",
+  "model": "ollama/llama3"
+}
+```
+
+**自定义代理/API**
+
+```json
+{
+  "model_name": "my-custom-model",
+  "model": "openai/custom-model",
+  "api_base": "https://my-proxy.com/v1",
+  "api_key": "sk-...",
+  "request_timeout": 300
+}
+```
+
+#### 负载均衡
+
+为同一个模型名称配置多个端点——PicoClaw 会自动在它们之间轮询：
+
+```json
+{
+  "model_list": [
+    {
+      "model_name": "gpt-5.4",
+      "model": "openai/gpt-5.4",
+      "api_base": "https://api1.example.com/v1",
+      "api_key": "sk-key1"
+    },
+    {
+      "model_name": "gpt-5.4",
+      "model": "openai/gpt-5.4",
+      "api_base": "https://api2.example.com/v1",
+      "api_key": "sk-key2"
+    }
+  ]
+}
+```
+
+#### 从旧的 `providers` 配置迁移
+
+旧的 `providers` 配置格式**已弃用**，但为向后兼容仍支持。
+
+**旧配置（已弃用）：**
+
+```json
+{
+  "providers": {
+    "zhipu": {
+      "api_key": "your-key",
+      "api_base": "https://open.bigmodel.cn/api/paas/v4"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "provider": "zhipu",
+      "model": "glm-4.7"
+    }
+  }
+}
+```
+
+**新配置（推荐）：**
+
+```json
+{
+  "model_list": [
+    {
+      "model_name": "glm-4.7",
+      "model": "zhipu/glm-4.7",
+      "api_key": "your-key"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "model": "glm-4.7"
+    }
+  }
+}
+```
+
+详细的迁移指南请参考 [docs/migration/model-list-migration.md](docs/migration/model-list-migration.md)。
+
+<details>
+<summary><b>智谱 (Zhipu) 配置示例</b></summary>
+
+**1. 获取 API key 和 base URL**
+
+- 获取 [API key](https://bigmodel.cn/usercenter/proj-mgmt/apikeys)
+
+**2. 配置**
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.picoclaw/workspace",
+      "model": "glm-4.7",
+      "max_tokens": 8192,
+      "temperature": 0.7,
+      "max_tool_iterations": 20
+    }
+  },
+  "providers": {
+    "zhipu": {
+      "api_key": "Your API Key",
+      "api_base": "https://open.bigmodel.cn/api/paas/v4"
+    }
+  }
+}
+```
+
+**3. 运行**
+
+```bash
+picoclaw agent -m "你好"
+
+```
+
+</details>
+
+<details>
+<summary><b>完整配置示例</b></summary>
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "anthropic/claude-opus-4-5"
+    }
+  },
+  "session": {
+    "dm_scope": "per-channel-peer",
+    "backlog_limit": 20
+  },
+  "providers": {
+    "openrouter": {
+      "api_key": "sk-or-v1-xxx"
+    },
+    "groq": {
+      "api_key": "gsk_xxx"
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "123456:ABC...",
+      "allow_from": ["123456789"]
+    },
+    "discord": {
+      "enabled": true,
+      "token": "",
+      "allow_from": [""]
+    },
+    "whatsapp": {
+      "enabled": false
+    },
+    "feishu": {
+      "enabled": false,
+      "app_id": "cli_xxx",
+      "app_secret": "xxx",
+      "encrypt_key": "",
+      "verification_token": "",
+      "allow_from": []
+    },
+    "qq": {
+      "enabled": false,
+      "app_id": "",
+      "app_secret": "",
+      "allow_from": []
+    }
+  },
+  "tools": {
+    "web": {
+      "brave": {
+        "enabled": false,
+        "api_key": "YOUR_BRAVE_API_KEY",
+        "max_results": 5
+      },
+      "duckduckgo": {
+        "enabled": true,
+        "max_results": 5
+      }
+    },
+    "cron": {
+      "exec_timeout_minutes": 5
+    }
+  },
+  "heartbeat": {
+    "enabled": true,
+    "interval": 30
+  }
+}
+```
+
+</details>
+
+## CLI 命令行参考
+
+| 命令                      | 描述               |
+| ------------------------- | ------------------ |
+| `picoclaw onboard`        | 初始化配置和工作区 |
+| `picoclaw agent -m "..."` | 与 Agent 对话      |
+| `picoclaw agent`          | 交互式聊天模式     |
+| `picoclaw gateway`        | 启动网关 (Gateway) |
+| `picoclaw status`         | 显示状态           |
+| `picoclaw cron list`      | 列出所有定时任务   |
+| `picoclaw cron add ...`   | 添加定时任务       |
+
+### 定时任务 / 提醒 (Scheduled Tasks)
+>>>>>>> refactor/agent
 
 PicoClaw 通过 `cron` 工具支持定时提醒和重复任务：
 

@@ -214,6 +214,7 @@ Kết nối PicoClaw với Mạng xã hội Agent chỉ bằng cách gửi một
 
 **Đọc `https://clawdchat.ai/skill.md` và làm theo hướng dẫn để tham gia [ClawdChat.ai](https://clawdchat.ai)**
 
+<<<<<<< HEAD
 ## 🖥️ Tham chiếu CLI
 
 | Lệnh                      | Mô tả                         |
@@ -233,6 +234,545 @@ Kết nối PicoClaw với Mạng xã hội Agent chỉ bằng cách gửi một
 | `picoclaw migrate`         | Di chuyển dữ liệu từ phiên bản cũ |
 | `picoclaw auth login`      | Xác thực với nhà cung cấp     |
 | `picoclaw model`           | Xem hoặc chuyển đổi model mặc định |
+=======
+## ⚙️ Cấu hình chi tiết
+
+File cấu hình: `~/.picoclaw/config.json`
+
+### Biến môi trường
+
+Bạn có thể ghi đè các đường dẫn mặc định bằng cách sử dụng các biến môi trường. Điều này hữu ích cho việc cài đặt di động, triển khai container hóa hoặc chạy picoclaw như một dịch vụ hệ thống. Các biến này độc lập và kiểm soát các đường dẫn khác nhau.
+
+| Biến              | Mô tả                                                                                                                             | Đường dẫn mặc định        |
+|-------------------|-----------------------------------------------------------------------------------------------------------------------------------------|---------------------------|
+| `PICOCLAW_CONFIG` | Ghi đè đường dẫn đến file cấu hình. Điều này trực tiếp yêu cầu picoclaw tải file `config.json` nào, bỏ qua tất cả các vị trí khác. | `~/.picoclaw/config.json` |
+| `PICOCLAW_HOME`   | Ghi đè thư mục gốc cho dữ liệu picoclaw. Điều này thay đổi vị trí mặc định của `workspace` và các thư mục dữ liệu khác.          | `~/.picoclaw`             |
+
+**Ví dụ:**
+
+```bash
+# Chạy picoclaw bằng một file cấu hình cụ thể
+# Đường dẫn workspace sẽ được đọc từ trong file cấu hình đó
+PICOCLAW_CONFIG=/etc/picoclaw/production.json picoclaw gateway
+
+# Chạy picoclaw với tất cả dữ liệu được lưu trữ trong /opt/picoclaw
+# Cấu hình sẽ được tải từ ~/.picoclaw/config.json mặc định
+# Workspace sẽ được tạo tại /opt/picoclaw/workspace
+PICOCLAW_HOME=/opt/picoclaw picoclaw agent
+
+# Sử dụng cả hai để có thiết lập tùy chỉnh hoàn toàn
+PICOCLAW_HOME=/srv/picoclaw PICOCLAW_CONFIG=/srv/picoclaw/main.json picoclaw gateway
+```
+
+### Cấu trúc Workspace
+
+PicoClaw lưu trữ dữ liệu trong workspace đã cấu hình (mặc định: `~/.picoclaw/workspace`):
+
+```
+~/.picoclaw/workspace/
+├── sessions/          # Phiên hội thoại và lịch sử
+├── memory/           # Bộ nhớ dài hạn (MEMORY.md)
+├── state/            # Trạng thái lưu trữ (kênh cuối cùng, v.v.)
+├── cron/             # Cơ sở dữ liệu tác vụ định kỳ
+├── skills/           # Kỹ năng tùy chỉnh
+├── AGENT.md          # Định nghĩa agent có cấu trúc và system prompt
+├── HEARTBEAT.md      # Prompt tác vụ định kỳ (kiểm tra mỗi 30 phút)
+├── SOUL.md           # Tâm hồn/Tính cách Agent
+└── ...
+```
+
+### 🔒 Hộp cát bảo mật (Security Sandbox)
+
+PicoClaw chạy trong môi trường sandbox theo mặc định. Agent chỉ có thể truy cập file và thực thi lệnh trong phạm vi workspace.
+
+#### Cấu hình mặc định
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.picoclaw/workspace",
+      "restrict_to_workspace": true
+    }
+  }
+}
+```
+
+| Tùy chọn | Mặc định | Mô tả |
+|----------|---------|-------|
+| `workspace` | `~/.picoclaw/workspace` | Thư mục làm việc của agent |
+| `restrict_to_workspace` | `true` | Giới hạn truy cập file/lệnh trong workspace |
+
+#### Công cụ được bảo vệ
+
+Khi `restrict_to_workspace: true`, các công cụ sau bị giới hạn trong sandbox:
+
+| Công cụ | Chức năng | Giới hạn |
+|---------|----------|---------|
+| `read_file` | Đọc file | Chỉ file trong workspace |
+| `write_file` | Ghi file | Chỉ file trong workspace |
+| `list_dir` | Liệt kê thư mục | Chỉ thư mục trong workspace |
+| `edit_file` | Sửa file | Chỉ file trong workspace |
+| `append_file` | Thêm vào file | Chỉ file trong workspace |
+| `exec` | Thực thi lệnh | Đường dẫn lệnh phải trong workspace |
+
+#### Bảo vệ bổ sung cho Exec
+
+Ngay cả khi `restrict_to_workspace: false`, công cụ `exec` vẫn chặn các lệnh nguy hiểm sau:
+
+* `rm -rf`, `del /f`, `rmdir /s` — Xóa hàng loạt
+* `format`, `mkfs`, `diskpart` — Định dạng ổ đĩa
+* `dd if=` — Tạo ảnh đĩa
+* Ghi vào `/dev/sd[a-z]` — Ghi trực tiếp lên đĩa
+* `shutdown`, `reboot`, `poweroff` — Tắt/khởi động lại hệ thống
+* Fork bomb `:(){ :|:& };:`
+
+#### Ví dụ lỗi
+
+```
+[ERROR] tool: Tool execution failed
+{tool=exec, error=Command blocked by safety guard (path outside working dir)}
+```
+
+```
+[ERROR] tool: Tool execution failed
+{tool=exec, error=Command blocked by safety guard (dangerous pattern detected)}
+```
+
+#### Tắt giới hạn (Rủi ro bảo mật)
+
+Nếu bạn cần agent truy cập đường dẫn ngoài workspace:
+
+**Cách 1: File cấu hình**
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "restrict_to_workspace": false
+    }
+  }
+}
+```
+
+**Cách 2: Biến môi trường**
+
+```bash
+export PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE=false
+```
+
+> ⚠️ **Cảnh báo**: Tắt giới hạn này cho phép agent truy cập mọi đường dẫn trên hệ thống. Chỉ sử dụng cẩn thận trong môi trường được kiểm soát.
+
+#### Tính nhất quán của ranh giới bảo mật
+
+Cài đặt `restrict_to_workspace` áp dụng nhất quán trên mọi đường thực thi:
+
+| Đường thực thi | Ranh giới bảo mật |
+|----------------|-------------------|
+| Agent chính | `restrict_to_workspace` ✅ |
+| Subagent / Spawn | Kế thừa cùng giới hạn ✅ |
+| Tác vụ Heartbeat | Kế thừa cùng giới hạn ✅ |
+
+Tất cả đường thực thi chia sẻ cùng giới hạn workspace — không có cách nào vượt qua ranh giới bảo mật thông qua subagent hoặc tác vụ định kỳ.
+
+### Heartbeat (Tác vụ định kỳ)
+
+PicoClaw có thể tự động thực hiện các tác vụ định kỳ. Tạo file `HEARTBEAT.md` trong workspace:
+
+```markdown
+# Tác vụ định kỳ
+
+- Kiểm tra email xem có tin nhắn quan trọng không
+- Xem lại lịch cho các sự kiện sắp tới
+- Kiểm tra dự báo thời tiết
+```
+
+Agent sẽ đọc file này mỗi 30 phút (có thể cấu hình) và thực hiện các tác vụ bằng công cụ có sẵn.
+
+#### Tác vụ bất đồng bộ với Spawn
+
+Đối với các tác vụ chạy lâu (tìm kiếm web, gọi API), sử dụng công cụ `spawn` để tạo **subagent**:
+
+```markdown
+# Tác vụ định kỳ
+
+## Tác vụ nhanh (trả lời trực tiếp)
+- Báo cáo thời gian hiện tại
+
+## Tác vụ lâu (dùng spawn cho async)
+- Tìm kiếm tin tức AI trên web và tóm tắt
+- Kiểm tra email và báo cáo tin nhắn quan trọng
+```
+
+**Hành vi chính:**
+
+| Tính năng | Mô tả |
+|-----------|-------|
+| **spawn** | Tạo subagent bất đồng bộ, không chặn heartbeat |
+| **Context độc lập** | Subagent có context riêng, không có lịch sử phiên |
+| **message tool** | Subagent giao tiếp trực tiếp với người dùng qua công cụ message |
+| **Không chặn** | Sau khi spawn, heartbeat tiếp tục tác vụ tiếp theo |
+
+#### Cách Subagent giao tiếp
+
+```
+Heartbeat kích hoạt
+    ↓
+Agent đọc HEARTBEAT.md
+    ↓
+Tác vụ lâu: spawn subagent
+    ↓                           ↓
+Tiếp tục tác vụ tiếp theo   Subagent làm việc độc lập
+    ↓                           ↓
+Tất cả tác vụ hoàn thành    Subagent dùng công cụ "message"
+    ↓                           ↓
+Phản hồi HEARTBEAT_OK       Người dùng nhận kết quả trực tiếp
+```
+
+Subagent có quyền truy cập các công cụ (message, web_search, v.v.) và có thể giao tiếp với người dùng một cách độc lập mà không cần thông qua agent chính.
+
+**Cấu hình:**
+
+```json
+{
+  "heartbeat": {
+    "enabled": true,
+    "interval": 30
+  }
+}
+```
+
+| Tùy chọn | Mặc định | Mô tả |
+|----------|---------|-------|
+| `enabled` | `true` | Bật/tắt heartbeat |
+| `interval` | `30` | Khoảng thời gian kiểm tra (phút, tối thiểu: 5) |
+
+**Biến môi trường:**
+
+* `PICOCLAW_HEARTBEAT_ENABLED=false` để tắt
+* `PICOCLAW_HEARTBEAT_INTERVAL=60` để thay đổi khoảng thời gian
+
+### Nhà cung cấp (Providers)
+
+> [!NOTE]
+> Groq cung cấp dịch vụ chuyển giọng nói thành văn bản miễn phí qua Whisper. Nếu đã cấu hình Groq, tin nhắn âm thanh từ bất kỳ kênh nào sẽ được tự động chuyển thành văn bản ở cấp độ agent.
+
+| Nhà cung cấp | Mục đích | Lấy API Key |
+| --- | --- | --- |
+| `gemini` | LLM (Gemini trực tiếp) | [aistudio.google.com](https://aistudio.google.com) |
+| `zhipu` | LLM (Zhipu trực tiếp) | [bigmodel.cn](bigmodel.cn) |
+| `volcengine`             | LLM(Volcengine trực tiếp)                   | [volcengine.com](https://www.volcengine.com/activity/codingplan?utm_campaign=PicoClaw&utm_content=PicoClaw&utm_medium=devrel&utm_source=OWO&utm_term=PicoClaw)           |
+| `openrouter` (Đang thử nghiệm) | LLM (khuyên dùng, truy cập mọi model) | [openrouter.ai](https://openrouter.ai) |
+| `anthropic` (Đang thử nghiệm) | LLM (Claude trực tiếp) | [console.anthropic.com](https://console.anthropic.com) |
+| `openai` (Đang thử nghiệm) | LLM (GPT trực tiếp) | [platform.openai.com](https://platform.openai.com) |
+| `deepseek` (Đang thử nghiệm) | LLM (DeepSeek trực tiếp) | [platform.deepseek.com](https://platform.deepseek.com) |
+| `groq` | LLM + **Chuyển giọng nói** (Whisper) | [console.groq.com](https://console.groq.com) |
+| `qwen` | LLM (Qwen trực tiếp) | [dashscope.console.aliyun.com](https://dashscope.console.aliyun.com) |
+| `cerebras` | LLM (Cerebras trực tiếp) | [cerebras.ai](https://cerebras.ai) |
+
+<details>
+<summary><b>Cấu hình Zhipu</b></summary>
+
+**1. Lấy API key**
+
+* Lấy [API key](https://bigmodel.cn/usercenter/proj-mgmt/apikeys)
+
+**2. Cấu hình**
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.picoclaw/workspace",
+      "model": "glm-4.7",
+      "max_tokens": 8192,
+      "temperature": 0.7,
+      "max_tool_iterations": 20
+    }
+  },
+  "providers": {
+    "zhipu": {
+      "api_key": "Your API Key",
+      "api_base": "https://open.bigmodel.cn/api/paas/v4"
+    }
+  }
+}
+```
+
+**3. Chạy**
+
+```bash
+picoclaw agent -m "Xin chào"
+```
+
+</details>
+
+<details>
+<summary><b>Ví dụ cấu hình đầy đủ</b></summary>
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "anthropic/claude-opus-4-5"
+    }
+  },
+  "providers": {
+    "openrouter": {
+      "api_key": "sk-or-v1-xxx"
+    },
+    "groq": {
+      "api_key": "gsk_xxx"
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "123456:ABC...",
+      "allow_from": ["123456789"]
+    },
+    "discord": {
+      "enabled": true,
+      "token": "",
+      "allow_from": [""]
+    },
+    "whatsapp": {
+      "enabled": false
+    },
+    "feishu": {
+      "enabled": false,
+      "app_id": "cli_xxx",
+      "app_secret": "xxx",
+      "encrypt_key": "",
+      "verification_token": "",
+      "allow_from": []
+    },
+    "qq": {
+      "enabled": false,
+      "app_id": "",
+      "app_secret": "",
+      "allow_from": []
+    }
+  },
+  "tools": {
+    "web": {
+      "brave": {
+        "enabled": false,
+        "api_key": "BSA...",
+        "max_results": 5
+      },
+      "duckduckgo": {
+        "enabled": true,
+        "max_results": 5
+      }
+    }
+  },
+  "heartbeat": {
+    "enabled": true,
+    "interval": 30
+  }
+}
+```
+
+</details>
+
+### Cấu hình Mô hình (model_list)
+
+> **Tính năng mới!** PicoClaw hiện sử dụng phương pháp cấu hình **đặt mô hình vào trung tâm**. Chỉ cần chỉ định dạng `nhà cung cấp/mô hình` (ví dụ: `zhipu/glm-4.7`) để thêm nhà cung cấp mới—**không cần thay đổi mã!**
+
+Thiết kế này cũng cho phép **hỗ trợ đa tác nhân** với lựa chọn nhà cung cấp linh hoạt:
+
+- **Tác nhân khác nhau, nhà cung cấp khác nhau** : Mỗi tác nhân có thể sử dụng nhà cung cấp LLM riêng
+- **Mô hình dự phòng** : Cấu hình mô hình chính và dự phòng để tăng độ tin cậy
+- **Cân bằng tải** : Phân phối yêu cầu trên nhiều endpoint khác nhau
+- **Cấu hình tập trung** : Quản lý tất cả nhà cung cấp ở một nơi
+
+#### 📋 Tất cả Nhà cung cấp được Hỗ trợ
+
+| Nhà cung cấp | Prefix `model` | API Base Mặc định | Giao thức | Khóa API |
+|-------------|----------------|-------------------|-----------|----------|
+| **OpenAI** | `openai/` | `https://api.openai.com/v1` | OpenAI | [Lấy Khóa](https://platform.openai.com) |
+| **Anthropic** | `anthropic/` | `https://api.anthropic.com/v1` | Anthropic | [Lấy Khóa](https://console.anthropic.com) |
+| **Zhipu AI (GLM)** | `zhipu/` | `https://open.bigmodel.cn/api/paas/v4` | OpenAI | [Lấy Khóa](https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys) |
+| **DeepSeek** | `deepseek/` | `https://api.deepseek.com/v1` | OpenAI | [Lấy Khóa](https://platform.deepseek.com) |
+| **Google Gemini** | `gemini/` | `https://generativelanguage.googleapis.com/v1beta` | OpenAI | [Lấy Khóa](https://aistudio.google.com/api-keys) |
+| **Groq** | `groq/` | `https://api.groq.com/openai/v1` | OpenAI | [Lấy Khóa](https://console.groq.com) |
+| **Moonshot** | `moonshot/` | `https://api.moonshot.cn/v1` | OpenAI | [Lấy Khóa](https://platform.moonshot.cn) |
+| **Qwen (Alibaba)** | `qwen/` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI | [Lấy Khóa](https://dashscope.console.aliyun.com) |
+| **NVIDIA** | `nvidia/` | `https://integrate.api.nvidia.com/v1` | OpenAI | [Lấy Khóa](https://build.nvidia.com) |
+| **Ollama** | `ollama/` | `http://localhost:11434/v1` | OpenAI | Local (không cần khóa) |
+| **OpenRouter** | `openrouter/` | `https://openrouter.ai/api/v1` | OpenAI | [Lấy Khóa](https://openrouter.ai/keys) |
+| **VLLM** | `vllm/` | `http://localhost:8000/v1` | OpenAI | Local |
+| **Cerebras** | `cerebras/` | `https://api.cerebras.ai/v1` | OpenAI | [Lấy Khóa](https://cerebras.ai) |
+| **VolcEngine (Doubao)** | `volcengine/` | `https://ark.cn-beijing.volces.com/api/v3` | OpenAI | [Lấy Khóa](https://www.volcengine.com/activity/codingplan?utm_campaign=PicoClaw&utm_content=PicoClaw&utm_medium=devrel&utm_source=OWO&utm_term=PicoClaw) |
+| **ShengsuanYun** | `shengsuanyun/` | `https://router.shengsuanyun.com/api/v1` | OpenAI | - |
+| **BytePlus**        | `byteplus/`       | `https://ark.ap-southeast.bytepluses.com/api/v3`    | OpenAI    | [Lấy Khóa](https://www.byteplus.com)                      |
+| **LongCat**         | `longcat/`        | `https://api.longcat.chat/openai`                   | OpenAI    | [Lấy Key](https://longcat.chat/platform)                        |
+| **ModelScope (魔搭)**| `modelscope/`    | `https://api-inference.modelscope.cn/v1`            | OpenAI    | [Lấy Token](https://modelscope.cn/my/tokens)                    |
+| **Antigravity** | `antigravity/` | Google Cloud | Tùy chỉnh | Chỉ OAuth |
+| **GitHub Copilot** | `github-copilot/` | `localhost:4321` | gRPC | - |
+
+#### Cấu hình Cơ bản
+
+```json
+{
+  "model_list": [
+    {
+      "model_name": "ark-code-latest",
+      "model": "volcengine/ark-code-latest",
+      "api_key": "sk-your-api-key"
+    },
+    {
+      "model_name": "gpt-5.4",
+      "model": "openai/gpt-5.4",
+      "api_key": "sk-your-openai-key"
+    },
+    {
+      "model_name": "claude-sonnet-4.6",
+      "model": "anthropic/claude-sonnet-4.6",
+      "api_key": "sk-ant-your-key"
+    },
+    {
+      "model_name": "glm-4.7",
+      "model": "zhipu/glm-4.7",
+      "api_key": "your-zhipu-key"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "model": "gpt-5.4"
+    }
+  }
+}
+```
+
+#### Ví dụ theo Nhà cung cấp
+
+**OpenAI**
+```json
+{
+  "model_name": "gpt-5.4",
+  "model": "openai/gpt-5.4",
+  "api_key": "sk-..."
+}
+```
+
+**VolcEngine (Doubao)**
+```json
+{
+  "model_name": "ark-code-latest",
+  "model": "volcengine/ark-code-latest",
+  "api_key": "sk-..."
+}
+```
+
+**Zhipu AI (GLM)**
+```json
+{
+  "model_name": "glm-4.7",
+  "model": "zhipu/glm-4.7",
+  "api_key": "your-key"
+}
+```
+
+**Anthropic (với OAuth)**
+```json
+{
+  "model_name": "claude-sonnet-4.6",
+  "model": "anthropic/claude-sonnet-4.6",
+  "auth_method": "oauth"
+}
+```
+> Chạy `picoclaw auth login --provider anthropic` để thiết lập thông tin xác thực OAuth.
+
+**Proxy/API tùy chỉnh**
+```json
+{
+  "model_name": "my-custom-model",
+  "model": "openai/custom-model",
+  "api_base": "https://my-proxy.com/v1",
+  "api_key": "sk-...",
+  "request_timeout": 300
+}
+```
+
+#### Cân bằng Tải tải
+
+Định cấu hình nhiều endpoint cho cùng một tên mô hình—PicoClaw sẽ tự động phân phối round-robin giữa chúng:
+
+```json
+{
+  "model_list": [
+    {
+      "model_name": "gpt-5.4",
+      "model": "openai/gpt-5.4",
+      "api_base": "https://api1.example.com/v1",
+      "api_key": "sk-key1"
+    },
+    {
+      "model_name": "gpt-5.4",
+      "model": "openai/gpt-5.4",
+      "api_base": "https://api2.example.com/v1",
+      "api_key": "sk-key2"
+    }
+  ]
+}
+```
+
+#### Chuyển đổi từ Cấu hình `providers` Cũ
+
+Cấu hình `providers` cũ đã **ngừng sử dụng** nhưng vẫn được hỗ trợ để tương thích ngược.
+
+**Cấu hình Cũ (đã ngừng sử dụng):**
+```json
+{
+  "providers": {
+    "zhipu": {
+      "api_key": "your-key",
+      "api_base": "https://open.bigmodel.cn/api/paas/v4"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "provider": "zhipu",
+      "model": "glm-4.7"
+    }
+  }
+}
+```
+
+**Cấu hình Mới (khuyến nghị):**
+```json
+{
+  "model_list": [
+    {
+      "model_name": "glm-4.7",
+      "model": "zhipu/glm-4.7",
+      "api_key": "your-key"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "model": "glm-4.7"
+    }
+  }
+}
+```
+
+Xem hướng dẫn chuyển đổi chi tiết tại [docs/migration/model-list-migration.md](docs/migration/model-list-migration.md).
+
+## Tham chiếu CLI
+
+| Lệnh | Mô tả |
+| --- | --- |
+| `picoclaw onboard` | Khởi tạo cấu hình & workspace |
+| `picoclaw agent -m "..."` | Trò chuyện với agent |
+| `picoclaw agent` | Chế độ chat tương tác |
+| `picoclaw gateway` | Khởi động gateway (cho bot chat) |
+| `picoclaw status` | Hiển thị trạng thái |
+| `picoclaw cron list` | Liệt kê tất cả tác vụ định kỳ |
+| `picoclaw cron add ...` | Thêm tác vụ định kỳ |
+>>>>>>> refactor/agent
 
 ### Tác vụ định kỳ / Nhắc nhở
 

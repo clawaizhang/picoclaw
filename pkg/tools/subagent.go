@@ -154,6 +154,9 @@ func (sm *SubagentManager) runTask(
 ) {
 	task.Status = "running"
 	task.Created = time.Now().UnixMilli()
+	// TODO(eventbus): once subagents are modeled as child turns inside
+	// pkg/agent, emit SubTurnEnd and SubTurnResultDelivered from the parent
+	// AgentLoop instead of this legacy manager.
 
 	// Check if context is already canceled before starting
 	select {
